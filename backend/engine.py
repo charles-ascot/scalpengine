@@ -170,9 +170,13 @@ class ScalpEngine:
         # ── API keys (from lay engine) ──
         self.api_keys: list[dict] = []
 
+        # ── Browser sessions (issued on Betfair login) ──
+        self.ui_sessions: dict = {}          # token → {created_at, expires_at}
+
         # ── Credentials ──
         self._username: Optional[str] = None
         self._password: Optional[str] = None
+        self._should_resume: bool = False   # set by _load_state on cold start
 
         # ── Monitoring ──
         self.monitoring: dict = {}   # market_id → [snapshots]
@@ -201,6 +205,9 @@ class ScalpEngine:
                 "risk_config": self.risk_config.to_dict(),
                 "errors": self.errors[-50:],
                 "last_scan": self.last_scan,
+                "session": self._session_snapshot(),
+                "ui_sessions": self.ui_sessions,
+                "running": self.running,
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }
             state_json = json.dumps(state, default=str)
@@ -233,6 +240,15 @@ class ScalpEngine:
             self.balance = data.get("balance")
             self.errors = data.get("errors", [])
             self.last_scan = data.get("last_scan")
+
+            # Restore the Betfair session so a Cloud Run cold start does not
+            # silently log the engine out mid-session.
+            self.ui_sessions = data.get("ui_sessions") or {}
+            self._prune_ui_sessions()
+
+            if self._restore_session(data.get("session")):
+                self._should_resume = bool(data.get("running"))
+
             logger.info("State restored from persistence")
         except Exception as e:
             logger.warning(f"Failed to load state: {e}")
@@ -430,6 +446,7 @@ class ScalpEngine:
         """
         now = datetime.now(timezone.utc)
         self.last_scan = now.isoformat()
+        self._recompute_portfolio()
 
         if not self.client.ensure_session():
             return
@@ -804,6 +821,49 @@ class ScalpEngine:
     #  API KEY MANAGEMENT (from lay engine)
     # ──────────────────────────────────────────────
 
+    def issue_ui_session(self, hours: int = 12) -> str:
+        """Mint a browser session token after a successful Betfair login."""
+        now = datetime.now(timezone.utc)
+        token = f"ses_{secrets.token_hex(24)}"
+        self.ui_sessions[token] = {
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(hours=hours)).isoformat(),
+        }
+        self._prune_ui_sessions()
+        self._save_state()
+        return token
+
+    def validate_ui_session(self, token: str) -> bool:
+        rec = self.ui_sessions.get(token)
+        if not rec:
+            return False
+        try:
+            expires = datetime.fromisoformat(rec["expires_at"])
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        if expires <= datetime.now(timezone.utc):
+            self.ui_sessions.pop(token, None)
+            return False
+        return True
+
+    def revoke_ui_session(self, token: str):
+        self.ui_sessions.pop(token, None)
+        self._save_state()
+
+    def _prune_ui_sessions(self):
+        now = datetime.now(timezone.utc)
+        for tok in list(self.ui_sessions):
+            try:
+                exp = datetime.fromisoformat(self.ui_sessions[tok]["expires_at"])
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp <= now:
+                    del self.ui_sessions[tok]
+            except Exception:
+                del self.ui_sessions[tok]
+
     def generate_api_key(self, label: str = "") -> dict:
         key = f"scp_{secrets.token_hex(24)}"
         record = {
@@ -828,8 +888,96 @@ class ScalpEngine:
     #  STATE GETTERS
     # ──────────────────────────────────────────────
 
+    def _session_snapshot(self) -> Optional[dict]:
+        """Serialise the live Betfair session so it can survive a cold start.
+
+        Only the short-lived session token is persisted — never the password.
+        """
+        if not (self.client and self.client.session_token):
+            return None
+        expiry = self.client.session_expiry
+        return {
+            "token": self.client.session_token,
+            "expiry": expiry.isoformat() if expiry else None,
+        }
+
+    def _restore_session(self, snapshot: Optional[dict]) -> bool:
+        """Rebuild a BetfairClient from a persisted session token.
+
+        Cloud Run scales to zero, so without this every cold start silently
+        de-authenticates the engine and /api/engine/start returns 401.
+        """
+        if not snapshot or not snapshot.get("token"):
+            return False
+        try:
+            raw = snapshot.get("expiry")
+            expiry = datetime.fromisoformat(raw) if raw else None
+            if expiry and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if not expiry or expiry <= datetime.now(timezone.utc):
+                logger.info("Persisted Betfair session expired — login required")
+                return False
+            client = BetfairClient(app_key=BETFAIR_APP_KEY, username="", password="")
+            client.session_token = snapshot["token"]
+            client.session_expiry = expiry
+            self.client = client
+            logger.info(f"Betfair session restored (expires {expiry.isoformat()})")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to restore Betfair session: {e}")
+            return False
+
+    def _recompute_portfolio(self):
+        """Rebuild portfolio_state from live trades and positions (B.13 Level 4).
+
+        portfolio_state was previously only ever read, never written, so every
+        Level-4 check (daily drawdown, rolling loss, capital utilisation)
+        evaluated against zeros and could never fire.
+
+        NOTE: settlements are never recorded by the engine, so rolling P&L is
+        derived from per-trade realised P&L rather than a true N-day window.
+        """
+        try:
+            closed = {"SETTLED", "CANCELLED", "ERROR"}
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            p = PortfolioState()
+
+            for trade_id, trade in self.trades.items():
+                pos = self.positions.get(trade_id) or {}
+                realised = float(pos.get("realized_pnl") or 0.0)
+                p.rolling_pnl += realised
+                if str(trade.get("created_at") or "")[:10] == today:
+                    p.daily_realised_pnl += realised
+
+                if trade.get("state") in closed:
+                    continue
+
+                exposure = float(pos.get("max_open_loss") or 0.0)
+                p.total_open_trades += 1
+                p.total_exposure += exposure
+                p.daily_unrealised_pnl += float(pos.get("unrealized_pnl") or 0.0)
+                if float(pos.get("hedge_completion_pct") or 0.0) < 100.0:
+                    p.total_unhedged += exposure
+
+                market_id = trade.get("market_id") or "unknown"
+                p.exposure_by_market[market_id] = (
+                    p.exposure_by_market.get(market_id, 0.0) + exposure
+                )
+                p.trades_by_market[market_id] = (
+                    p.trades_by_market.get(market_id, 0) + 1
+                )
+                sport = trade.get("sport") or "HORSE_RACING"
+                p.exposure_by_sport[sport] = (
+                    p.exposure_by_sport.get(sport, 0.0) + exposure
+                )
+
+            self.portfolio_state = p
+        except Exception as e:
+            logger.warning(f"Portfolio recompute failed: {e}")
+
     def get_state(self) -> dict:
         """Full engine state for the dashboard."""
+        self._recompute_portfolio()
         return {
             "status": self.status,
             "dry_run": self.dry_run,

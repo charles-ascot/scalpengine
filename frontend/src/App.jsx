@@ -1,12 +1,25 @@
 import { useState, useEffect, useCallback } from 'react'
 
 const API = import.meta.env.VITE_API_URL || ''
+const TOKEN_KEY = 'chimera_session_token'
+
+// Session token is issued by /api/login and required once the backend runs
+// with REQUIRE_AUTH=true. Storage can throw in private-browsing modes.
+const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) } catch { return null } }
+const setToken = t => {
+  try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY) } catch { /* ignore */ }
+}
+const authHeaders = (extra = {}) => {
+  const t = getToken()
+  return t ? { ...extra, 'X-Session-Token': t } : extra
+}
 
 function useFetch(url, interval = null) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState(null)
   const load = useCallback(() => {
-    fetch(`${API}${url}`).then(r => r.json()).then(setData).catch(setErr)
+    fetch(`${API}${url}`, { headers: authHeaders() })
+      .then(r => r.json()).then(setData).catch(setErr)
   }, [url])
   useEffect(() => {
     load()
@@ -17,7 +30,7 @@ function useFetch(url, interval = null) {
 
 function post(url, body = {}) {
   return fetch(`${API}${url}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   }).then(r => r.json())
 }
@@ -33,7 +46,7 @@ function LoginScreen({ onLogin }) {
     setLoading(true); setErr('')
     try {
       const r = await post('/api/login', { username: u, password: p })
-      if (r.status === 'ok') onLogin(r.balance)
+      if (r.status === 'ok') { setToken(r.session_token); onLogin(r.balance) }
       else setErr(r.message || 'Login failed')
     } catch (e) { setErr(e.message) }
     setLoading(false)
@@ -438,9 +451,9 @@ export default function App() {
   // be used as an auth signal — /api/keepalive reports the real thing.
   useEffect(() => {
     const check = () =>
-      fetch(`${API}/api/keepalive`)
+      fetch(`${API}/api/keepalive`, { headers: authHeaders() })
         .then(r => r.json())
-        .then(d => setAuthed(!!d.authenticated))
+        .then(d => setAuthed(!!d.authenticated && (!d.require_auth || !!getToken())))
         .catch(() => {})
         .finally(() => setAuthChecked(true))
     check()
@@ -472,7 +485,7 @@ export default function App() {
             {state?.active_trades || 0} trades · {state?.active_alerts || 0} alerts
           </span>
           <ControlsBar state={state} onReload={reload} />
-          <button className="btn btn-sm" onClick={() => { post('/api/logout'); setAuthed(false) }}>Logout</button>
+          <button className="btn btn-sm" onClick={() => { post('/api/logout'); setToken(null); setAuthed(false) }}>Logout</button>
         </div>
       </div>
 

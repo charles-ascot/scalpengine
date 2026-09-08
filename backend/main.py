@@ -26,7 +26,7 @@ env_path = Path(__file__).resolve().parent.parent / ".env"
 if env_path.exists():
     load_dotenv(env_path)
 
-from fastapi import FastAPI, Header, Query, HTTPException
+from fastapi import FastAPI, Header, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -41,10 +41,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("chimera_scalp")
 
-app = FastAPI(title="CHIMERA Scalping Engine", version="1.0.0")
+app = FastAPI(title="CHIMERA Scalping Engine", version="1.1.0")
 
 # ── CORS ──
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://scalping.thync.online")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://scalpengine.thync.online")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -60,6 +60,25 @@ app.add_middleware(
 
 # ── Engine singleton ──
 engine = ScalpEngine()
+
+
+@app.on_event("startup")
+def _resume_after_cold_start():
+    """Restart the scan loop if the instance was recycled while running.
+
+    Cloud Run scales to zero; without this the engine comes back STOPPED even
+    though a valid Betfair session was restored from persistence.
+    """
+    try:
+        if engine._should_resume and engine.is_authenticated:
+            engine.start()
+            logger.info("Engine auto-resumed after cold start")
+        elif engine._should_resume:
+            logger.warning("Resume wanted but no valid Betfair session — login required")
+    except Exception as e:
+        logger.error(f"Auto-resume failed: {e}")
+    finally:
+        engine._should_resume = False
 
 
 # ── Request models ──
@@ -101,8 +120,31 @@ class LadderProfileRequest(BaseModel):
 
 
 # ── Auth dependency ──
+#
+# Disabled by default so existing deployments keep working unchanged. Set
+# REQUIRE_AUTH=true on Cloud Run to close the API to anonymous callers — do
+# this before going live, since the kill switch and risk config are mutable.
+REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "false").lower() == "true"
+
+
+def require_auth(
+    x_api_key: str = Header(None),
+    x_session_token: str = Header(None),
+    api_key: str = Query(None),
+):
+    """Accept either a browser session token or a machine API key."""
+    if not REQUIRE_AUTH:
+        return None
+    if x_session_token and engine.validate_ui_session(x_session_token):
+        return x_session_token
+    key = x_api_key or api_key
+    if key and engine.validate_api_key(key):
+        return key
+    raise HTTPException(status_code=401, detail="Authentication required")
+
 
 def require_api_key(x_api_key: str = Header(None), api_key: str = Query(None)):
+    """Machine-only gate. Always enforced, regardless of REQUIRE_AUTH."""
     key = x_api_key or api_key
     if not key:
         raise HTTPException(status_code=401, detail="Missing API key")
@@ -127,6 +169,7 @@ def keepalive():
         "status": "ok",
         "engine": engine.status,
         "authenticated": engine.is_authenticated,
+        "require_auth": REQUIRE_AUTH,
         "dry_run": engine.dry_run,
         "active_trades": len([
             t for t in engine.trades.values()
@@ -135,7 +178,7 @@ def keepalive():
         "active_alerts": len(engine.active_alerts),
     }
 
-@app.get("/api/state")
+@app.get("/api/state", dependencies=[Depends(require_auth)])
 def get_state():
     return engine.get_state()
 
@@ -146,38 +189,44 @@ def get_state():
 def login(req: LoginRequest):
     success, error = engine.login(req.username, req.password)
     if success:
-        return {"status": "ok", "balance": engine.balance}
+        return {
+            "status": "ok",
+            "balance": engine.balance,
+            "session_token": engine.issue_ui_session(),
+        }
     return JSONResponse(
         status_code=401,
         content={"status": "error", "message": f"Login failed: {error}"},
     )
 
-@app.post("/api/logout")
-def logout():
+@app.post("/api/logout", dependencies=[Depends(require_auth)])
+def logout(x_session_token: str = Header(None)):
+    if x_session_token:
+        engine.revoke_ui_session(x_session_token)
     engine.logout()
     return {"status": "ok"}
 
 
 # ── Engine Controls ──
 
-@app.post("/api/engine/start")
+@app.post("/api/engine/start", dependencies=[Depends(require_auth)])
 def start_engine():
     if not engine.is_authenticated:
         return JSONResponse(status_code=401, content={"status": "error", "message": "Not authenticated"})
     engine.start()
     return {"status": engine.status}
 
-@app.post("/api/engine/stop")
+@app.post("/api/engine/stop", dependencies=[Depends(require_auth)])
 def stop_engine():
     engine.stop()
     return {"status": engine.status}
 
-@app.post("/api/engine/dry-run")
+@app.post("/api/engine/dry-run", dependencies=[Depends(require_auth)])
 def toggle_dry_run():
     engine.dry_run = not engine.dry_run
     return {"dry_run": engine.dry_run}
 
-@app.post("/api/engine/point-value")
+@app.post("/api/engine/point-value", dependencies=[Depends(require_auth)])
 def set_point_value(req: PointValueRequest):
     if req.value < 0.5 or req.value > 100:
         raise HTTPException(status_code=400, detail="Point value must be 0.5–100")
@@ -185,7 +234,7 @@ def set_point_value(req: PointValueRequest):
     engine._save_state()
     return {"point_value": engine.point_value}
 
-@app.post("/api/engine/countries")
+@app.post("/api/engine/countries", dependencies=[Depends(require_auth)])
 def set_countries(req: CountriesRequest):
     valid = {"GB", "IE", "ZA", "FR"}
     filtered = [c for c in req.countries if c in valid]
@@ -195,7 +244,7 @@ def set_countries(req: CountriesRequest):
     engine._save_state()
     return {"countries": engine.countries}
 
-@app.post("/api/engine/process-window")
+@app.post("/api/engine/process-window", dependencies=[Depends(require_auth)])
 def set_process_window(req: ProcessWindowRequest):
     if req.minutes < 5 or req.minutes > 240:
         raise HTTPException(status_code=400, detail="Window must be 5–240 minutes")
@@ -203,7 +252,7 @@ def set_process_window(req: ProcessWindowRequest):
     engine._save_state()
     return {"process_window": engine.process_window}
 
-@app.post("/api/engine/ladder-profile")
+@app.post("/api/engine/ladder-profile", dependencies=[Depends(require_auth)])
 def set_ladder_profile(req: LadderProfileRequest):
     if req.profile not in ("VERY_DEFENSIVE", "DEFENSIVE", "BALANCED"):
         raise HTTPException(status_code=400, detail="Invalid profile")
@@ -214,7 +263,7 @@ def set_ladder_profile(req: LadderProfileRequest):
 
 # ── Markets ──
 
-@app.get("/api/markets")
+@app.get("/api/markets", dependencies=[Depends(require_auth)])
 def get_markets():
     from datetime import datetime as dt, timezone as tz
     now = dt.now(tz.utc)
@@ -232,7 +281,7 @@ def get_markets():
 
 # ── Candidates ──
 
-@app.get("/api/candidates")
+@app.get("/api/candidates", dependencies=[Depends(require_auth)])
 def get_candidates():
     return {
         "candidates": engine.qualified_candidates[-50:],
@@ -242,17 +291,17 @@ def get_candidates():
 
 # ── Trades ──
 
-@app.get("/api/trades")
+@app.get("/api/trades", dependencies=[Depends(require_auth)])
 def get_trades():
     active = {tid: t for tid, t in engine.trades.items()
               if t.get("state") not in ("SETTLED", "CANCELLED", "ERROR")}
     return {"trades": active, "count": len(active)}
 
-@app.get("/api/trades/all")
+@app.get("/api/trades/all", dependencies=[Depends(require_auth)])
 def get_all_trades():
     return {"trades": engine.trades, "count": len(engine.trades)}
 
-@app.get("/api/trades/{trade_id}")
+@app.get("/api/trades/{trade_id}", dependencies=[Depends(require_auth)])
 def get_trade(trade_id: str):
     trade = engine.trades.get(trade_id)
     if not trade:
@@ -263,14 +312,14 @@ def get_trade(trade_id: str):
         "position": engine.positions.get(trade_id),
     }
 
-@app.post("/api/trades/{trade_id}/control")
+@app.post("/api/trades/{trade_id}/control", dependencies=[Depends(require_auth)])
 def set_trade_control(trade_id: str, req: TradeControlRequest):
     ok, error = engine.set_trade_control(trade_id, req.mode, reason=req.reason)
     if not ok:
         raise HTTPException(status_code=400, detail=error)
     return {"trade_id": trade_id, "control_mode": req.mode}
 
-@app.post("/api/trades/{trade_id}/flatten")
+@app.post("/api/trades/{trade_id}/flatten", dependencies=[Depends(require_auth)])
 def flatten_trade(trade_id: str):
     ok, error = engine.flatten_trade(trade_id)
     if not ok:
@@ -280,21 +329,21 @@ def flatten_trade(trade_id: str):
 
 # ── Bookmaker Trigger Alerts ──
 
-@app.get("/api/alerts")
+@app.get("/api/alerts", dependencies=[Depends(require_auth)])
 def get_alerts():
     return {
         "active": engine.active_alerts,
         "count": len(engine.active_alerts),
     }
 
-@app.get("/api/alerts/history")
+@app.get("/api/alerts/history", dependencies=[Depends(require_auth)])
 def get_alert_history():
     return {
         "alerts": engine.alert_history[-100:],
         "count": len(engine.alert_history),
     }
 
-@app.post("/api/alerts/{alert_id}/confirm")
+@app.post("/api/alerts/{alert_id}/confirm", dependencies=[Depends(require_auth)])
 def confirm_alert(alert_id: str, req: ConfirmBetRequest):
     ok, error = engine.confirm_external_bet({
         "alert_id": alert_id,
@@ -308,7 +357,7 @@ def confirm_alert(alert_id: str, req: ConfirmBetRequest):
         raise HTTPException(status_code=400, detail=error)
     return {"status": "confirmed", "alert_id": alert_id}
 
-@app.post("/api/alerts/{alert_id}/dismiss")
+@app.post("/api/alerts/{alert_id}/dismiss", dependencies=[Depends(require_auth)])
 def dismiss_alert(alert_id: str):
     for a in engine.active_alerts:
         if a.get("alert_id") == alert_id:
@@ -322,7 +371,7 @@ def dismiss_alert(alert_id: str):
 
 # ── Risk ──
 
-@app.get("/api/risk")
+@app.get("/api/risk", dependencies=[Depends(require_auth)])
 def get_risk():
     return {
         "config": engine.risk_config.to_dict(),
@@ -334,7 +383,7 @@ def get_risk():
         },
     }
 
-@app.post("/api/risk/config")
+@app.post("/api/risk/config", dependencies=[Depends(require_auth)])
 def update_risk_config(req: RiskConfigUpdate):
     if req.max_loss_per_trade is not None:
         engine.risk_config.max_loss_per_trade = req.max_loss_per_trade
@@ -349,7 +398,7 @@ def update_risk_config(req: RiskConfigUpdate):
     engine._save_state()
     return {"config": engine.risk_config.to_dict()}
 
-@app.post("/api/risk/kill-switch")
+@app.post("/api/risk/kill-switch", dependencies=[Depends(require_auth)])
 def toggle_kill_switch():
     engine.risk_config.kill_switch_enabled = not engine.risk_config.kill_switch_enabled
     engine._save_state()
@@ -358,27 +407,55 @@ def toggle_kill_switch():
 
 # ── Positions ──
 
-@app.get("/api/positions")
+@app.get("/api/positions", dependencies=[Depends(require_auth)])
 def get_positions():
     return {"positions": engine.positions}
 
 
 # ── Settlements ──
 
-@app.get("/api/settlements")
+@app.get("/api/settlements", dependencies=[Depends(require_auth)])
 def get_settlements():
     return {"settlements": engine.settlements[-100:]}
 
 
 # ── Audit Trail ──
 
-@app.get("/api/audit")
+@app.get("/api/audit", dependencies=[Depends(require_auth)])
 def get_audit():
     return {"transitions": engine.state_transitions[-100:]}
 
 
 # ── Sessions ──
 
-@app.get("/api/sessions")
+@app.get("/api/sessions", dependencies=[Depends(require_auth)])
 def get_sessions():
     return {"sessions": engine.sessions[-50:]}
+
+
+# ── API Key Management ──
+
+class ApiKeyRequest(BaseModel):
+    label: str = ""
+
+
+@app.post("/api/keys", dependencies=[Depends(require_auth)])
+def create_api_key(req: ApiKeyRequest):
+    """Mint a machine API key. The raw key is shown once, here."""
+    return engine.generate_api_key(req.label)
+
+
+@app.get("/api/keys", dependencies=[Depends(require_auth)])
+def list_api_keys():
+    """List key metadata. Never returns the key material itself."""
+    return {
+        "keys": [
+            {
+                "key_id": k["key_id"],
+                "label": k["label"],
+                "created_at": k["created_at"],
+                "last_used": k.get("last_used"),
+            }
+            for k in engine.api_keys
+        ]
+    }

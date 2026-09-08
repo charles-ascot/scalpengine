@@ -32,10 +32,20 @@ Built from CHI-SPC-002 (Chimera Scalping Strategy, April 2026):
 
 ## Environment Variables (Cloud Run)
 - BETFAIR_APP_KEY
-- FRONTEND_URL (Cloudflare Pages domain)
+- FRONTEND_URL (Cloudflare Pages domain — must match the real frontend origin or CORS fails)
 - GCS_BUCKET (state persistence bucket)
 - DRY_RUN (true/false)
 - POLL_INTERVAL (seconds, default 15)
+- REQUIRE_AUTH (true/false, default false — closes the API to unauthenticated callers)
+
+## Cloud Run Settings
+The scan loop is a background thread, so the service needs CPU always
+allocated and a warm instance or it stalls between requests:
+`--no-cpu-throttling --min-instances=1`
+
+## Tests
+`./backend/tests/run_all.sh` — Betfair is stubbed, so no network or
+credentials are needed. Run it before pushing backend changes.
 
 ## Claude Code Rules
 - Do NOT touch wrangler.jsonc or platform config
