@@ -7,6 +7,34 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+Documentation only — no code changes.
+
+### Documentation
+
+- **Configuration precedence.** Documented that `dry_run`, `countries`,
+  `process_window`, `point_value` and `ladder_profile` are restored from GCS
+  and take precedence over their environment variables within the same UTC
+  day. `_load_state()` discards stored state only when `day_started` differs
+  from the current UTC date, so `DRY_RUN=true` on Cloud Run does not override
+  a dry-run toggle made through the dashboard. This was found in production:
+  the service reported `dry_run: false` while `DRY_RUN` was unset on Cloud Run
+  and the Dockerfile default was `true` — the value had been toggled in the UI
+  and persisted through subsequent deploys.
+- **Corrected the Cloud Run commands.** They omitted `--project=chimera-v4`
+  and failed with `Service [scalpengine] could not be found` for anyone whose
+  active gcloud project was not `chimera-v4` (project number `950990732577`).
+- **Added instructions for enabling `REQUIRE_AUTH`** on Cloud Run, with the
+  list of mutating endpoints that are anonymous until it is set.
+- **Flagged `BETFAIR_APP_KEY` secret handling.** It is stored as a plain
+  environment variable, readable by anyone with Cloud Run viewer access on
+  `chimera-v4`; Secret Manager is the safer option before live trading.
+- Recorded the production `GCS_BUCKET` (`chimera-scalping-state`), confirming
+  that the 1.1.0 session persistence has somewhere to write.
+
+---
+
 ## [1.1.0] — 2026-09-08
 
 Hardening pass following the 1.0.1 investigation. Everything here is covered

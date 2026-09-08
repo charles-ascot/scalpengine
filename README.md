@@ -75,8 +75,8 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 |---|---|---|
 | `BETFAIR_APP_KEY` | — | Betfair application key. Required. |
 | `FRONTEND_URL` | `https://scalping.thync.online` | CORS origin. **Must** be set to the real frontend domain. |
-| `GCS_BUCKET` | — | Bucket for state persistence. Without it, state dies with the container. |
-| `DRY_RUN` | `true` | `false` places real bets. |
+| `GCS_BUCKET` | — | Bucket for state persistence (production: `chimera-scalping-state`). Without it, state dies with the container. |
+| `DRY_RUN` | `true` | `false` places real bets. **Overridden by persisted state — see [Configuration precedence](#configuration-precedence).** |
 | `POLL_INTERVAL` | `15` | Seconds between scan cycles. |
 | `PROCESS_WINDOW_MINUTES` | `120` | How far ahead of the off to consider races. |
 | `REQUIRE_AUTH` | `false` | `true` closes the API to unauthenticated callers. See [Authentication](#authentication). |
@@ -86,6 +86,40 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 | Variable | Purpose |
 |---|---|
 | `VITE_API_URL` | Cloud Run backend URL. Baked in at build time — changing it needs a rebuild. |
+
+## Configuration precedence
+
+Several settings are persisted to GCS and **take precedence over the
+environment variables** when the engine boots. This is the single most
+surprising thing about operating this service.
+
+`_load_state()` compares the stored `day_started` against the current UTC date:
+
+- **Same UTC day, state exists** — the stored values win. `dry_run`,
+  `countries`, `process_window`, `point_value` and `ladder_profile` are all
+  restored from GCS, and the corresponding environment variables are ignored.
+- **New UTC day, or no state** — stored state is discarded wholesale and the
+  environment variables and code defaults apply.
+
+The practical consequence: **toggling DRY RUN off in the dashboard persists.**
+It survives redeploys and container recycles, and setting `DRY_RUN=true` on
+Cloud Run will *not* override it within the same UTC day. To return to dry
+run, toggle it back in the dashboard or:
+
+```bash
+curl -X POST https://<backend-url>/api/engine/dry-run
+```
+
+Always confirm the live value before trading rather than inferring it from
+Cloud Run's configuration:
+
+```bash
+curl -s https://<backend-url>/api/keepalive
+```
+
+`day_started` is set once at construction and never advanced by the scan
+loop, so an instance that stays warm across midnight keeps the old date until
+it is recycled.
 
 ## Authentication
 
@@ -159,8 +193,14 @@ between requests, so with the default settings the loop stalls whenever
 traffic goes quiet. For continuous operation the service needs CPU always
 allocated and at least one warm instance:
 
+The service lives in project **`chimera-v4`** (project number
+`950990732577`), region `europe-west2`. `--project` is required unless that
+is your active gcloud project — omitting it fails with
+`Service [scalpengine] could not be found`.
+
 ```bash
 gcloud run services update scalpengine \
+  --project=chimera-v4 \
   --region=europe-west2 \
   --no-cpu-throttling \
   --min-instances=1
@@ -169,6 +209,29 @@ gcloud run services update scalpengine \
 Without this the engine appears to run but scans only while someone is
 watching the dashboard. `--min-instances=1` also keeps the Betfair session
 alive continuously, since the loop's keepalive keeps renewing it.
+
+### Before trading live
+
+Close the API to anonymous callers. Until this is set, `POST
+/api/risk/kill-switch`, `POST /api/risk/config` and `POST /api/engine/dry-run`
+are reachable by anyone holding the Cloud Run URL:
+
+```bash
+gcloud run services update scalpengine \
+  --project=chimera-v4 \
+  --region=europe-west2 \
+  --update-env-vars=REQUIRE_AUTH=true
+```
+
+Anyone already on the dashboard is bounced to the login screen once, and
+receives a session token on logging back in.
+
+### Secret handling
+
+`BETFAIR_APP_KEY` is currently a plain environment variable, readable by
+anyone with Cloud Run viewer access on `chimera-v4`. Consider moving it to
+Secret Manager and referencing it with `--set-secrets` before this service
+handles real money.
 
 ## Known limitations
 
