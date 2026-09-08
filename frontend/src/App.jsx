@@ -429,24 +429,26 @@ function ControlsBar({ state, onReload }) {
 // ── Main App ──
 export default function App() {
   const [authed, setAuthed] = useState(false)
+  const [authChecked, setAuthChecked] = useState(false)
   const [tab, setTab] = useState('dashboard')
   const { data: state, reload } = useFetch('/api/state', 5000)
 
+  // Ask the backend whether a Betfair session actually exists.
+  // /api/state is public and always returns a status field, so it can never
+  // be used as an auth signal — /api/keepalive reports the real thing.
   useEffect(() => {
-    if (state && state.status !== undefined) setAuthed(true)
-  }, [state])
-
-  // Check if authenticated on load
-  useEffect(() => {
-    fetch(`${API}/api/health`).then(r => r.json()).then(d => {
-      if (d.status === 'ok') {
-        fetch(`${API}/api/state`).then(r => r.json()).then(s => {
-          if (s.balance !== null && s.balance !== undefined) setAuthed(true)
-        }).catch(() => {})
-      }
-    }).catch(() => {})
+    const check = () =>
+      fetch(`${API}/api/keepalive`)
+        .then(r => r.json())
+        .then(d => setAuthed(!!d.authenticated))
+        .catch(() => {})
+        .finally(() => setAuthChecked(true))
+    check()
+    const id = setInterval(check, 10000)
+    return () => clearInterval(id)
   }, [])
 
+  if (!authChecked) return null
   if (!authed) return <LoginScreen onLogin={() => setAuthed(true)} />
 
   const tabs = [
