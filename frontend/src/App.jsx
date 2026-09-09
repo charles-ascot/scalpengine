@@ -322,6 +322,101 @@ function MarketsTab() {
 }
 
 // ── Risk Tab ──
+// ── Risk Settings (editable) ──
+// The Risk tab used to be read-only, which meant limits could only be changed
+// with hand-rolled curl calls carrying a session token. These are the fields
+// that actually matter for sizing a live run.
+function RiskSettings({ l1, l4, onSaved }) {
+  const { data: state, reload: reloadState } = useFetch('/api/state', null)
+  const [form, setForm] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState(null)
+
+  // Seed the form from live values, once
+  useEffect(() => {
+    if (form || !state || l4.bankroll === undefined) return
+    setForm({
+      bankroll: l4.bankroll ?? '',
+      max_loss_per_trade: l1.max_loss_per_trade ?? '',
+      daily_drawdown_cap: l4.daily_drawdown_cap ?? '',
+      point_value: state.point_value ?? '',
+    })
+  }, [form, state, l1, l4])
+
+  if (!form) return null
+
+  const set = k => e => setForm({ ...form, [k]: e.target.value })
+  const balance = state?.balance
+  const bankrollOff = balance != null && Number(form.bankroll) !== Number(balance)
+
+  const save = async () => {
+    setSaving(true); setMsg(null)
+    const num = v => (v === '' || v === null ? null : Number(v))
+    try {
+      const r = await post('/api/risk/config', {
+        bankroll: num(form.bankroll),
+        max_loss_per_trade: num(form.max_loss_per_trade),
+        daily_drawdown_cap: num(form.daily_drawdown_cap),
+      })
+      if (r?.detail) throw new Error(r.detail)
+
+      const pv = num(form.point_value)
+      if (pv !== null) {
+        const p2 = await post('/api/engine/point-value', { value: pv })
+        if (p2?.detail) throw new Error(p2.detail)
+      }
+      setMsg({ ok: true, text: 'Saved' })
+      reloadState()
+      onSaved && onSaved()
+    } catch (e) {
+      setMsg({ ok: false, text: e.message || 'Save failed' })
+    }
+    setSaving(false)
+  }
+
+  const field = (label, key, hint) => (
+    <div>
+      <span style={{ color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>{label}</span>
+      <input type="number" step="0.01" value={form[key]} onChange={set(key)}
+        style={{ width: '100%', marginTop: 4, fontFamily: 'var(--font-mono)' }} />
+      {hint && <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{hint}</span>}
+    </div>
+  )
+
+  return (
+    <div className="card">
+      <h3>Adjust Limits</h3>
+      <div className="grid-4" style={{ marginBottom: 14 }}>
+        {field('Bankroll (£)', 'bankroll', 'All Level 4 caps are a % of this')}
+        {field('Max Loss/Trade (£)', 'max_loss_per_trade')}
+        {field('Daily Cap (£)', 'daily_drawdown_cap')}
+        {field('Point Value (£)', 'point_value', 'Stake unit, 0.5–100')}
+      </div>
+
+      {bankrollOff && (
+        <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--amber)' }}>
+          Bankroll does not match your Betfair balance of £{Number(balance).toFixed(2)} — caps will be sized against the wrong figure.{' '}
+          <button className="btn btn-sm" type="button"
+            onClick={() => setForm({ ...form, bankroll: balance })}>
+            Use £{Number(balance).toFixed(2)}
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <button className="btn btn-gold" onClick={save} disabled={saving}>
+          {saving ? 'Saving...' : 'Save Limits'}
+        </button>
+        {msg && (
+          <span style={{ fontSize: 12, fontWeight: 700, color: msg.ok ? 'var(--green)' : 'var(--red)' }}>
+            {msg.text}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function RiskTab() {
   const { data, reload } = useFetch('/api/risk', 10000)
 
@@ -345,6 +440,8 @@ function RiskTab() {
         </button>
         {c.kill_switch_enabled && <span style={{ color: 'var(--red)', marginLeft: 12, fontWeight: 700 }}>KILL SWITCH ACTIVE — ALL NEW TRADES BLOCKED</span>}
       </div>
+
+      <RiskSettings l1={l1} l4={l4} onSaved={reload} />
 
       <div className="grid-3">
         <div className="card">
