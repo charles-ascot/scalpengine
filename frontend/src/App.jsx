@@ -3,6 +3,29 @@ import { useState, useEffect, useCallback } from 'react'
 const API = import.meta.env.VITE_API_URL || ''
 const TOKEN_KEY = 'chimera_session_token'
 
+// Betfair market start times and every backend timestamp are UTC. Slicing the
+// ISO string showed raw UTC, an hour behind UK racing time through BST — a
+// 17:15 card rendered as 16:15. Parse properly and render in UK local time,
+// which covers Irish meetings too since Dublin and London share an offset.
+const RACE_TZ = 'Europe/London'
+const asDate = iso => {
+  if (!iso) return null
+  const s = /([Zz]|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? null : d
+}
+const fmtTime = (iso, withSeconds = false) => {
+  const d = asDate(iso)
+  if (!d) return '—'
+  return d.toLocaleTimeString('en-GB', {
+    timeZone: RACE_TZ, hour12: false,
+    hour: '2-digit', minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' } : {}),
+  })
+}
+const hhmm = iso => fmtTime(iso)
+const hhmmss = iso => fmtTime(iso, true)
+
 // Session token is issued by /api/login and required once the backend runs
 // with REQUIRE_AUTH=true. Storage can throw in private-browsing modes.
 const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) } catch { return null } }
@@ -118,7 +141,7 @@ function DashboardTab() {
               <tr><td>Window</td><td style={{ fontFamily: 'var(--font-mono)' }}>{s.process_window}m</td></tr>
               <tr><td>Point Value</td><td style={{ fontFamily: 'var(--font-mono)' }}>£{s.point_value}</td></tr>
               <tr><td>Ladder</td><td style={{ fontFamily: 'var(--font-mono)' }}>{s.ladder_profile}</td></tr>
-              <tr><td>Last Scan</td><td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{s.last_scan?.slice(11, 19) || '—'}</td></tr>
+              <tr><td>Last Scan (UK)</td><td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{hhmmss(s.last_scan)}</td></tr>
             </tbody>
           </table>
         </div>
@@ -149,7 +172,7 @@ function DashboardTab() {
           <h3 style={{ color: 'var(--red)' }}>Errors</h3>
           {s.errors.map((e, i) => (
             <div key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
-              {e.timestamp?.slice(11, 19)} — {e.message}
+              {hhmmss(e.timestamp)} — {e.message}
             </div>
           ))}
         </div>
@@ -185,7 +208,7 @@ function TradesTab() {
               <span style={{ fontSize: 16, fontWeight: 700 }}>{t.horse_name}</span>
               <span style={{ color: 'var(--text-muted)', marginLeft: 12, fontSize: 12 }}>{t.venue}</span>
               <span style={{ color: 'var(--text-muted)', marginLeft: 8, fontSize: 12, fontFamily: 'var(--font-mono)' }}>
-                {t.race_time?.slice(11, 16)}
+                {hhmm(t.race_time)}
               </span>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -202,7 +225,7 @@ function TradesTab() {
             <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Entry Odds</span><br /><span style={{ fontFamily: 'var(--font-mono)' }}>{t.entry_odds?.toFixed(2)}</span></div>
             <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Quality</span><br /><span style={{ fontFamily: 'var(--font-mono)' }}>{t.quality_score?.toFixed(4)}</span></div>
             <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Trade ID</span><br /><span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{t.trade_id}</span></div>
-            <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Created</span><br /><span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{t.created_at?.slice(11, 19)}</span></div>
+            <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Created</span><br /><span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{hhmmss(t.created_at)}</span></div>
           </div>
 
           <div style={{ display: 'flex', gap: 8 }}>
@@ -304,7 +327,7 @@ function MarketsTab() {
         <tbody>
           {markets.slice(0, 40).map(m => (
             <tr key={m.market_id}>
-              <td>{m.race_time?.slice(11, 16)}</td>
+              <td>{hhmm(m.race_time)}</td>
               <td>{m.venue}</td>
               <td>{m.market_name}</td>
               <td>{m.runners?.length || '?'}</td>
@@ -500,7 +523,7 @@ function AuditTab() {
           <tbody>
             {[...transitions].reverse().slice(0, 50).map((t, i) => (
               <tr key={i}>
-                <td>{t.timestamp?.slice(11, 19)}</td>
+                <td>{hhmmss(t.timestamp)}</td>
                 <td><span className="badge badge-blue">{t.entity_type}</span></td>
                 <td style={{ fontSize: 10 }}>{t.entity_id?.slice(0, 12)}</td>
                 <td>{t.from_state}</td>

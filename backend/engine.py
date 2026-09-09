@@ -186,6 +186,7 @@ class ScalpEngine:
         self._load_sessions()
         self._load_api_keys()
         self._load_trades()
+        self._purge_stale_trades()
 
     # ──────────────────────────────────────────────
     #  STATE PERSISTENCE
@@ -446,6 +447,7 @@ class ScalpEngine:
         """
         now = datetime.now(timezone.utc)
         self.last_scan = now.isoformat()
+        self._purge_stale_trades()
         self._recompute_portfolio()
 
         if not self.client.ensure_session():
@@ -926,6 +928,58 @@ class ScalpEngine:
         except Exception as e:
             logger.warning(f"Failed to restore Betfair session: {e}")
             return False
+
+    @staticmethod
+    def _parse_dt(raw) -> Optional[datetime]:
+        """Parse an ISO timestamp, assuming UTC when no zone is given."""
+        if not raw:
+            return None
+        try:
+            d = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    def _purge_stale_trades(self) -> int:
+        """Drop trades that can no longer do anything.
+
+        _load_trades has no day filter, so without this the active list grows
+        without bound: yesterday's PLANNED trades for races that have long
+        since run keep showing in the dashboard as though they were live, and
+        inflate the active-trade count.
+
+        Anything still holding exposure is kept regardless of age — a stuck
+        position is exactly what an operator needs to see.
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            today = now.strftime("%Y-%m-%d")
+            closed = {"SETTLED", "CANCELLED", "ERROR"}
+            drop = []
+
+            for trade_id, trade in self.trades.items():
+                state = trade.get("state")
+                if state == "PLANNED":
+                    # Never committed money, and the race has already run
+                    race_time = self._parse_dt(trade.get("race_time"))
+                    if race_time and race_time < now:
+                        drop.append(trade_id)
+                elif state in closed:
+                    created = str(trade.get("created_at") or "")[:10]
+                    if created and created != today:
+                        drop.append(trade_id)
+
+            for trade_id in drop:
+                self.trades.pop(trade_id, None)
+                self.trade_plans.pop(trade_id, None)
+                self.positions.pop(trade_id, None)
+
+            if drop:
+                logger.info(f"Purged {len(drop)} stale trades ({len(self.trades)} remain)")
+            return len(drop)
+        except Exception as e:
+            logger.warning(f"Trade purge failed: {e}")
+            return 0
 
     def _recompute_portfolio(self):
         """Rebuild portfolio_state from live trades and positions (B.13 Level 4).

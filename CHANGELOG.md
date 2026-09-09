@@ -7,6 +7,40 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.2.0] — 2026-09-09
+
+### Fixed
+
+- **Race times displayed in UTC, an hour behind UK racing.** Every timestamp
+  in the dashboard was rendered by slicing characters out of the raw ISO
+  string (`race_time.slice(11, 16)`), which skips timezone conversion
+  entirely. Betfair returns `marketStartTime` in UTC, so a 13:51 Redcar card
+  showed as 12:51 through BST. The "mins to off" column was computed
+  correctly, which made the display look internally consistent and hid the
+  problem. Times are now parsed and formatted in `Europe/London`, which also
+  covers Irish meetings, and correctly shows no shift under GMT in winter.
+- **Trades accumulated forever.** `_load_trades()` has no day filter, unlike
+  `_load_state()`, so trades were restored across days without bound —
+  yesterday's `PLANNED` trades for races that had already run stayed in the
+  active list and inflated the trade count. `_purge_stale_trades()` now drops
+  `PLANNED` trades whose race has passed and closed trades from previous
+  days, on boot and on every scan. Anything still holding exposure is kept
+  regardless of age.
+
+### Added
+
+- **Editable risk limits in the dashboard.** The Risk tab could display
+  bankroll, per-trade loss and the daily cap but never change them, so sizing
+  a live run meant hand-rolled `curl` calls carrying a session token pulled
+  out of `localStorage`. An Adjust Limits panel now covers bankroll, max loss
+  per trade, daily drawdown cap and point value. Because every Level-4 cap is
+  a percentage of bankroll, a mismatch between bankroll and the real Betfair
+  balance sizes the caps against a number that does not exist — the panel
+  warns on any mismatch and offers a one-click correction.
+- `backend/tests/test_purge.py`, bringing the suite to 60 assertions.
+
+---
+
 ## [Unreleased]
 
 Documentation only — no code changes.

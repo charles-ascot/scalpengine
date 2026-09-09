@@ -18,5 +18,9 @@ echo "── persistence + portfolio ──"
 "$PY" test_persistence.py 2>/dev/null | grep -E "PASS|FAIL|passed" || fail=1
 
 echo
+echo "── stale trade purge ──"
+"$PY" test_purge.py 2>/dev/null | grep -E "PASS|FAIL|passed" || fail=1
+
+echo
 [ "$fail" -eq 0 ] && echo "ALL SUITES PASSED" || echo "SUITE FAILURES"
 exit "$fail"

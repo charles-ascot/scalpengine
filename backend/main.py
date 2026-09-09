@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("chimera_scalp")
 
-app = FastAPI(title="CHIMERA Scalping Engine", version="1.1.0")
+app = FastAPI(title="CHIMERA Scalping Engine", version="1.2.0")
 
 # ── CORS ──
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://scalpengine.thync.online")
