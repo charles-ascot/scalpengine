@@ -26,7 +26,9 @@ Built from CHI-SPC-002 (Chimera Scalping Strategy, April 2026):
 - `backend/main.py` — FastAPI server
 
 ## Deploy
-- Backend: Push to `main` → Cloud Build runs `cloudbuild.yaml` (test → build → deploy)
+- Backend: Push to `main` → trigger `scalpengine-deploy` runs `cloudbuild.yaml`
+  (test → build → push → deploy → verify). `verify` fails the build if the live
+  service differs from the yaml — the deploy has already happened by then
 - Frontend: Push to `main` → Cloudflare Pages auto-deploys
 - Set VITE_API_URL in Cloudflare Pages env vars to point at Cloud Run URL
 - Every Cloud Run flag lives in `cloudbuild.yaml`. Never set one by hand, and

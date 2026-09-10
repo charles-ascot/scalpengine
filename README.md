@@ -209,8 +209,8 @@ blocks on a drawdown breach.
 Both halves deploy on push to `main`:
 
 - **Backend** → Cloud Run, via Cloud Build running [`cloudbuild.yaml`](cloudbuild.yaml):
-  tests, then build, then deploy. A failing, crashing or empty test suite stops
-  the build before anything ships.
+  test → build → push → deploy → verify. A failing, crashing or empty test
+  suite stops the build before anything ships.
 - **Frontend** → Cloudflare Pages, from `frontend/`. Typically live within a minute.
 
 The service lives in project **`chimera-v4`** (project number `950990732577`),
@@ -227,9 +227,14 @@ the Cloud Run "continuous deployment" wizard.** It runs
 `services update --image --labels` and nothing else, so every flag in this
 file goes inert.
 
-> **Pending (10 Sep 2026):** the wizard trigger
-> `rmgpgab-scalpengine-europe-west2-charles-ascot-scalpengine--psi` has not yet
-> been replaced. Until it is, deploys bypass this file.
+The trigger is `scalpengine-deploy`. It replaced the wizard trigger on
+10 September 2026.
+
+The last build step, `verify`, runs
+[`scripts/verify_deploy.py`](scripts/verify_deploy.py) against the live service
+and fails the build if any flag differs from this file. By then the deploy has
+already happened, so a failed `verify` means the live service needs attention —
+do not just retry.
 
 To deploy by hand during an incident:
 

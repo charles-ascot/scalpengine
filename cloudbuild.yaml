@@ -77,6 +77,19 @@ steps:
       - --labels=managed-by=cloudbuild-yaml,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID
       - --quiet
 
+  # Prove the deploy took effect: compare the live service with the flags
+  # above. The deploy has already happened by this point, so a failure here
+  # means the live service needs attention — it is not safe to just retry.
+  - id: verify
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        gcloud run services describe scalpengine --project=chimera-v4 \
+          --region=europe-west2 --format=json | python3 scripts/verify_deploy.py
+
 images:
   - europe-west2-docker.pkg.dev/chimera-v4/cloud-run-source-deploy/scalpengine/scalpengine:$BUILD_ID
 

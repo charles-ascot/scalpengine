@@ -16,8 +16,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   that runs `services update --image --labels` and nothing else, so its
   configuration existed only on the service and would have been lost on any
   rebuild. Paths are inlined and images tagged with `$BUILD_ID` so the file
-  also runs by hand under `gcloud builds submit` during an incident.
-  **Takes effect when the wizard trigger is replaced — pending.**
+  also runs by hand under `gcloud builds submit` during an incident. The
+  wizard trigger was replaced by `scalpengine-deploy` on 10 September; its
+  first run deployed revision `scalpengine-00019-8qg`, and all fourteen live
+  flags matched this file.
+- **`verify` build step** — `scripts/verify_deploy.py` compares the live
+  service with the deploy flags in `cloudbuild.yaml` after every deploy and
+  fails the build on any difference, so no deploy is assumed to have taken
+  effect. It reports unexpected env vars by name only, so a secret that leaks
+  into a plain env var cannot leak into the build log too. Tested against the
+  live service with `maxScale` tampered to 20: it fails.
 - **`.dockerignore` and `.gcloudignore`**, deliberately different: tests must
   reach Cloud Build but never ship. Previously `COPY backend/ .` put the test
   suite in the production image. Verified in Cloud Build: the image now holds
@@ -29,13 +37,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `scalpengine-betfair-app-key`, replicated in `europe-west2` only and
   readable only by the runtime service account. It had been a plain env var,
   readable by anyone with Cloud Run viewer access. Created from the live value
-  without printing it, and verified by hash. The service switches to it on the
-  first `cloudbuild.yaml` deploy; older revisions keep the plain value in
-  their configuration until deleted.
+  without printing it, and verified by hash. Live since revision
+  `scalpengine-00019-8qg`, with no plain value left on the service. Revisions
+  before that keep the plain value in their configuration until deleted.
 
 ### Changed
 
-- **`--max-instances` 20 → 1**, on the first `cloudbuild.yaml` deploy. The
+- **`--max-instances` 20 → 1**, live since revision `scalpengine-00019-8qg`. The
   engine is a singleton holding trade state in memory. A second instance
   would run a second scan loop, race the first on the GCS state files, and —
   once execution exists — place duplicate orders.

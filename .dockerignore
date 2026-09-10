@@ -6,6 +6,7 @@
 .dockerignore
 .gcloudignore
 cloudbuild.yaml
+scripts/
 *.md
 frontend/
 backend/tests/
