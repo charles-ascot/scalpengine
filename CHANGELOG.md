@@ -9,6 +9,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — operator key
+
+- **Operator API key** in Secret Manager (`scalpengine-ops-api-key`), mounted
+  as `OPS_API_KEY` and accepted as `X-API-Key`. Operating the locked API had
+  meant pulling a session token out of a browser's `localStorage` or typing a
+  Betfair password into a terminal. Compared in constant time; if the secret
+  is not mounted, no operator key exists — it never falls back to a default.
+
 ### Added — execution loop, Stage 1
 
 - **Orders, fills and reconciliation** (`backend/execution.py`, B.14). The

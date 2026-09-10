@@ -39,6 +39,7 @@ Built from CHI-SPC-002 (Chimera Scalping Strategy, April 2026):
 
 ## Environment Variables (Cloud Run)
 - BETFAIR_APP_KEY (Secret Manager: `scalpengine-betfair-app-key` — never a plain env var)
+- OPS_API_KEY (Secret Manager: `scalpengine-ops-api-key` — operator key for API access; read with `gcloud secrets versions access`, never print it)
 - FRONTEND_URL (Cloudflare Pages domain — must match the real frontend origin or CORS fails)
 - GCS_BUCKET (state persistence bucket)
 - DRY_RUN (true/false)

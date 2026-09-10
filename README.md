@@ -206,7 +206,12 @@ With `REQUIRE_AUTH=true`, every endpoint except `/api/health`,
 `/api/keepalive` and `/api/login` requires either:
 
 - `X-Session-Token` — issued by `/api/login`, valid 12 hours, for the browser; or
-- `X-API-Key` — a long-lived key from `POST /api/keys`, for machine callers.
+- `X-API-Key` — a long-lived key from `POST /api/keys`, for machine callers; or
+  the **operator key**, mounted from Secret Manager (`scalpengine-ops-api-key`)
+  as `OPS_API_KEY`. The operator key lets tooling run the API without a
+  browser session or a Betfair password. Read it with
+  `gcloud secrets versions access latest --secret=scalpengine-ops-api-key --project=chimera-v4`;
+  rotate it by adding a secret version and redeploying.
 
 The dashboard stores its session token in `localStorage` and sends it
 automatically. Turn `REQUIRE_AUTH` on before going live: the kill switch,
@@ -299,6 +304,14 @@ gcloud builds submit --project=chimera-v4 --config=cloudbuild.yaml
 | `--set-secrets` | Mounts the Betfair app key from Secret Manager. See below. |
 
 ### Secret handling
+
+Two secrets, both in Secret Manager, replicated in `europe-west2` only and
+readable only by the runtime service account:
+
+| Secret | Mounted as | Holds |
+|---|---|---|
+| `scalpengine-betfair-app-key` | `BETFAIR_APP_KEY` | Betfair application key |
+| `scalpengine-ops-api-key` | `OPS_API_KEY` | Operator API key |
 
 `BETFAIR_APP_KEY` is held in Secret Manager as `scalpengine-betfair-app-key`,
 replicated in `europe-west2` only, and readable only by the runtime service

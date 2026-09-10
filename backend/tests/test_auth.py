@@ -9,6 +9,7 @@ os.environ.update({
     "API_KEYS_FILE": f"{TMP}/keys.json",
     "TRADES_FILE":   f"{TMP}/trades.json",
     "GCS_BUCKET": "", "BETFAIR_APP_KEY": "test_key", "DRY_RUN": "true",
+    "OPS_API_KEY": "ops_test_key_value",
 })
 REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "false")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -75,6 +76,13 @@ if REQUIRE_AUTH == "true":
           c.get("/api/state", headers={"X-API-Key": raw}).status_code == 200)
     check("bogus token rejected",
           c.get("/api/state", headers={"X-Session-Token": "nope"}).status_code == 401)
+
+print("\n[operator key]")
+if REQUIRE_AUTH == "true":
+    check("operator key authenticates", c.get("/api/state", headers={"X-API-Key": "ops_test_key_value"}).status_code == 200)
+    check("wrong operator key rejected", c.get("/api/state", headers={"X-API-Key": "ops_test_key_valuX"}).status_code == 401)
+    check("operator key cannot be minted via /api/keys listing",
+          all("ops_test_key_value" not in str(k) for k in c.get("/api/keys", headers={"X-API-Key": "ops_test_key_value"}).json()["keys"]))
 
 print("\n[logout revokes]")
 c.post("/api/logout", headers=h)

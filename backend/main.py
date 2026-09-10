@@ -18,6 +18,7 @@ Mirrors the Lay Engine API pattern with scalping-specific endpoints:
 """
 
 import os
+import hmac
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
@@ -132,6 +133,17 @@ class LadderProfileRequest(BaseModel):
 # this before going live, since the kill switch and risk config are mutable.
 REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "false").lower() == "true"
 
+# Operator key, mounted from Secret Manager (scalpengine-ops-api-key). Lets
+# tooling operate the API without a browser session or a Betfair password.
+# Unset means no operator key exists; it never falls back to a default.
+OPS_API_KEY = os.environ.get("OPS_API_KEY", "")
+
+
+def _valid_key(key: str) -> bool:
+    if OPS_API_KEY and hmac.compare_digest(key.encode(), OPS_API_KEY.encode()):
+        return True
+    return engine.validate_api_key(key)
+
 
 def require_auth(
     x_api_key: str = Header(None),
@@ -144,7 +156,7 @@ def require_auth(
     if x_session_token and engine.validate_ui_session(x_session_token):
         return x_session_token
     key = x_api_key or api_key
-    if key and engine.validate_api_key(key):
+    if key and _valid_key(key):
         return key
     raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -154,7 +166,7 @@ def require_api_key(x_api_key: str = Header(None), api_key: str = Query(None)):
     key = x_api_key or api_key
     if not key:
         raise HTTPException(status_code=401, detail="Missing API key")
-    if not engine.validate_api_key(key):
+    if not _valid_key(key):
         raise HTTPException(status_code=403, detail="Invalid API key")
     return key
 

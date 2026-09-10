@@ -77,7 +77,7 @@ steps:
       - --no-cpu-throttling
       - --cpu-boost
       - --set-env-vars=FRONTEND_URL=https://scalpengine.thync.online,GCS_BUCKET=chimera-scalping-state,REQUIRE_AUTH=true,LIVE_ORDERS_ENABLED=false
-      - --set-secrets=BETFAIR_APP_KEY=scalpengine-betfair-app-key:latest
+      - --set-secrets=BETFAIR_APP_KEY=scalpengine-betfair-app-key:latest,OPS_API_KEY=scalpengine-ops-api-key:latest
       - --labels=managed-by=cloudbuild-yaml,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID
       - --quiet
 
