@@ -1,0 +1,84 @@
+# Test, build and deploy scalpengine to Cloud Run.
+#
+# Every deploy flag lives here so it is versioned with the code. Create the
+# trigger with --build-config=cloudbuild.yaml. Never use the Cloud Run
+# "continuous deployment" wizard: it runs `services update --image --labels`
+# and nothing else, so any flag not already on the service is silently lost.
+#
+# Paths are inlined rather than assembled from ${PROJECT_ID} substitutions,
+# which do not expand under `gcloud builds submit`. This file must be runnable
+# by hand during an incident:
+#
+#   gcloud builds submit --project=chimera-v4 --config=cloudbuild.yaml
+#
+# Images are tagged with $BUILD_ID because it is set in both trigger and
+# manual runs; $COMMIT_SHA is empty under `gcloud builds submit`.
+
+steps:
+  # Tests run first. Any failure, crash or empty suite stops the build before
+  # anything is built or shipped.
+  - id: test
+    name: python:3.12-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        pip install --quiet --no-cache-dir --root-user-action=ignore \
+          -r backend/requirements.txt -r backend/requirements-dev.txt
+        bash backend/tests/run_all.sh
+
+  # .dockerignore keeps tests and dev dependencies out of the image.
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --no-cache
+      - -t
+      - europe-west2-docker.pkg.dev/chimera-v4/cloud-run-source-deploy/scalpengine/scalpengine:$BUILD_ID
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - europe-west2-docker.pkg.dev/chimera-v4/cloud-run-source-deploy/scalpengine/scalpengine:$BUILD_ID
+
+  # --max-instances=1 is deliberate. The engine is a singleton holding trade
+  # state in memory; a second instance runs a second scan loop and races the
+  # first on the GCS state files, and once execution exists it would place
+  # duplicate orders.
+  #
+  # Public access is IAM on the service, not a deploy flag, so it is left
+  # untouched here. Recreating the service from scratch would need
+  # --allow-unauthenticated added once.
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - scalpengine
+      - --project=chimera-v4
+      - --region=europe-west2
+      - --platform=managed
+      - --image=europe-west2-docker.pkg.dev/chimera-v4/cloud-run-source-deploy/scalpengine/scalpengine:$BUILD_ID
+      - --service-account=scalpengine-cloudrun@chimera-v4.iam.gserviceaccount.com
+      - --port=8080
+      - --cpu=1
+      - --memory=512Mi
+      - --concurrency=80
+      - --min-instances=1
+      - --max-instances=1
+      - --no-cpu-throttling
+      - --cpu-boost
+      - --set-env-vars=FRONTEND_URL=https://scalpengine.thync.online,GCS_BUCKET=chimera-scalping-state,REQUIRE_AUTH=true
+      - --set-secrets=BETFAIR_APP_KEY=scalpengine-betfair-app-key:latest
+      - --labels=managed-by=cloudbuild-yaml,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID
+      - --quiet
+
+images:
+  - europe-west2-docker.pkg.dev/chimera-v4/cloud-run-source-deploy/scalpengine/scalpengine:$BUILD_ID
+
+options:
+  logging: CLOUD_LOGGING_ONLY

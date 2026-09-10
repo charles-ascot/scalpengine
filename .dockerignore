@@ -1,0 +1,15 @@
+# Build context for the backend image. Deliberately NOT the same list as
+# .gcloudignore: tests and dev dependencies must reach Cloud Build so the
+# test step can run them, but must never ship in the image.
+.git
+.gitignore
+.dockerignore
+.gcloudignore
+cloudbuild.yaml
+*.md
+frontend/
+backend/tests/
+backend/requirements-dev.txt
+**/__pycache__/
+**/*.py[cod]
+.env

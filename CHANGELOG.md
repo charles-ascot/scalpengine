@@ -9,7 +9,41 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **`cloudbuild.yaml`** — tests, build and deploy, with every Cloud Run flag
+  locked in the repo. The service was deployed by a Cloud Run wizard trigger
+  that runs `services update --image --labels` and nothing else, so its
+  configuration existed only on the service and would have been lost on any
+  rebuild. Paths are inlined and images tagged with `$BUILD_ID` so the file
+  also runs by hand under `gcloud builds submit` during an incident.
+  **Takes effect when the wizard trigger is replaced — pending.**
+- **`.dockerignore` and `.gcloudignore`**, deliberately different: tests must
+  reach Cloud Build but never ship. Previously `COPY backend/ .` put the test
+  suite in the production image. Verified in Cloud Build: the image now holds
+  only application files.
+
+### Security
+
+- **Betfair app key moved to Secret Manager** as
+  `scalpengine-betfair-app-key`, replicated in `europe-west2` only and
+  readable only by the runtime service account. It had been a plain env var,
+  readable by anyone with Cloud Run viewer access. Created from the live value
+  without printing it, and verified by hash. The service switches to it on the
+  first `cloudbuild.yaml` deploy; older revisions keep the plain value in
+  their configuration until deleted.
+
 ### Changed
+
+- **`--max-instances` 20 → 1**, on the first `cloudbuild.yaml` deploy. The
+  engine is a singleton holding trade state in memory. A second instance
+  would run a second scan loop, race the first on the GCS state files, and —
+  once execution exists — place duplicate orders.
+- **Test runner fails loudly.** `run_all.sh` now fails any suite that
+  crashes or reports zero assertions, and prints its output on failure, since
+  CI has no other way to show the traceback. Verified in Cloud Build: a
+  runner pointed at `/bin/true` (finds nothing) and `/bin/false` (crashes
+  silently) both fail the build.
 
 - **Disabled the four controls that do nothing.** Flatten, Lock / Assisted /
   Auto, Confirm Bet and the Dry run / Live toggle looked fully functional in

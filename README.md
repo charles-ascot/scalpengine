@@ -98,7 +98,7 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BETFAIR_APP_KEY` | — | Betfair application key. Required. |
+| `BETFAIR_APP_KEY` | — | Betfair application key, mounted from Secret Manager (`scalpengine-betfair-app-key`). Required. |
 | `FRONTEND_URL` | `https://scalping.thync.online` | CORS origin. **Must** be set to the real frontend domain. |
 | `GCS_BUCKET` | — | Bucket for state persistence (production: `chimera-scalping-state`). Without it, state dies with the container. |
 | `DRY_RUN` | `true` | Intended to gate real orders. **Currently gates nothing** — see [Control status](#control-status). **Overridden by persisted state — see [Configuration precedence](#configuration-precedence).** |
@@ -208,56 +208,53 @@ blocks on a drawdown breach.
 
 Both halves deploy on push to `main`:
 
-- **Backend** → Cloud Run, from the root `Dockerfile`.
+- **Backend** → Cloud Run, via Cloud Build running [`cloudbuild.yaml`](cloudbuild.yaml):
+  tests, then build, then deploy. A failing, crashing or empty test suite stops
+  the build before anything ships.
 - **Frontend** → Cloudflare Pages, from `frontend/`. Typically live within a minute.
 
-## Operational requirements
+The service lives in project **`chimera-v4`** (project number `950990732577`),
+region `europe-west2`.
 
-The scan loop is a background thread. Cloud Run throttles CPU to near zero
-between requests, so with the default settings the loop stalls whenever
-traffic goes quiet. For continuous operation the service needs CPU always
-allocated and at least one warm instance:
+### Every Cloud Run setting lives in `cloudbuild.yaml`
 
-The service lives in project **`chimera-v4`** (project number
-`950990732577`), region `europe-west2`. `--project` is required unless that
-is your active gcloud project — omitting it fails with
-`Service [scalpengine] could not be found`.
+Scaling, CPU, env vars and the secret reference are all deploy flags in
+`cloudbuild.yaml`. Change them there. A setting applied by hand with
+`gcloud run services update` is overwritten by the next deploy.
 
-```bash
-gcloud run services update scalpengine \
-  --project=chimera-v4 \
-  --region=europe-west2 \
-  --no-cpu-throttling \
-  --min-instances=1
-```
+The trigger must be created with `--build-config=cloudbuild.yaml`. **Never use
+the Cloud Run "continuous deployment" wizard.** It runs
+`services update --image --labels` and nothing else, so every flag in this
+file goes inert.
 
-Without this the engine appears to run but scans only while someone is
-watching the dashboard. `--min-instances=1` also keeps the Betfair session
-alive continuously, since the loop's keepalive keeps renewing it.
+> **Pending (10 Sep 2026):** the wizard trigger
+> `rmgpgab-scalpengine-europe-west2-charles-ascot-scalpengine--psi` has not yet
+> been replaced. Until it is, deploys bypass this file.
 
-### API authentication
-
-`REQUIRE_AUTH=true` has been set in production since 9 September 2026. For
-any new environment, set it before anything else — without it `POST
-/api/risk/kill-switch`, `POST /api/risk/config` and `POST /api/engine/dry-run`
-are reachable by anyone holding the Cloud Run URL:
+To deploy by hand during an incident:
 
 ```bash
-gcloud run services update scalpengine \
-  --project=chimera-v4 \
-  --region=europe-west2 \
-  --update-env-vars=REQUIRE_AUTH=true
+gcloud builds submit --project=chimera-v4 --config=cloudbuild.yaml
 ```
 
-Anyone already on the dashboard is bounced to the login screen once, and
-receives a session token on logging back in.
+### Why the flags are what they are
+
+| Flag | Why |
+|---|---|
+| `--min-instances=1`, `--no-cpu-throttling` | The scan loop is a background thread. Without CPU always allocated and a warm instance, Cloud Run throttles it between requests and it stalls whenever nobody is watching the dashboard. It also keeps the Betfair session alive. |
+| `--max-instances=1` | The engine is a singleton holding trade state in memory. A second instance runs a second scan loop and races the first on the GCS state files — and once execution exists, would place duplicate orders. |
+| `REQUIRE_AUTH=true` | Without it the kill switch, risk config and dry-run toggle are reachable by anyone holding the Cloud Run URL. |
+| `--set-secrets` | Mounts the Betfair app key from Secret Manager. See below. |
 
 ### Secret handling
 
-`BETFAIR_APP_KEY` is currently a plain environment variable, readable by
-anyone with Cloud Run viewer access on `chimera-v4`. Consider moving it to
-Secret Manager and referencing it with `--set-secrets` before this service
-handles real money.
+`BETFAIR_APP_KEY` is held in Secret Manager as `scalpengine-betfair-app-key`,
+replicated in `europe-west2` only, and readable only by the runtime service
+account `scalpengine-cloudrun@chimera-v4.iam.gserviceaccount.com`.
+`cloudbuild.yaml` mounts it at `:latest`, so rotating the key is a new secret
+version followed by a deploy.
+
+No secret belongs in this repository. `.env` is gitignored.
 
 ## Known limitations
 

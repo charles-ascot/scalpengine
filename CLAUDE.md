@@ -26,12 +26,16 @@ Built from CHI-SPC-002 (Chimera Scalping Strategy, April 2026):
 - `backend/main.py` — FastAPI server
 
 ## Deploy
-- Backend: Push to GitHub → Cloud Run auto-deploys
-- Frontend: Push to GitHub → Cloudflare Pages auto-deploys
+- Backend: Push to `main` → Cloud Build runs `cloudbuild.yaml` (test → build → deploy)
+- Frontend: Push to `main` → Cloudflare Pages auto-deploys
 - Set VITE_API_URL in Cloudflare Pages env vars to point at Cloud Run URL
+- Every Cloud Run flag lives in `cloudbuild.yaml`. Never set one by hand, and
+  never create a trigger with the Cloud Run wizard — it deploys image and
+  labels only. Triggers use `--build-config=cloudbuild.yaml`.
+- Project `chimera-v4`, region `europe-west2`. Pass `--project=chimera-v4`.
 
 ## Environment Variables (Cloud Run)
-- BETFAIR_APP_KEY
+- BETFAIR_APP_KEY (Secret Manager: `scalpengine-betfair-app-key` — never a plain env var)
 - FRONTEND_URL (Cloudflare Pages domain — must match the real frontend origin or CORS fails)
 - GCS_BUCKET (state persistence bucket)
 - DRY_RUN (true/false)
@@ -39,15 +43,18 @@ Built from CHI-SPC-002 (Chimera Scalping Strategy, April 2026):
 - REQUIRE_AUTH (true/false, default false — closes the API to unauthenticated callers)
 
 ## Cloud Run Settings
-The scan loop is a background thread, so the service needs CPU always
-allocated and a warm instance or it stalls between requests:
-`--no-cpu-throttling --min-instances=1`
+Locked in `cloudbuild.yaml`: `--min-instances=1 --max-instances=1
+--no-cpu-throttling`. The scan loop is a background thread (stalls if
+throttled) and the engine is a singleton (a second instance races it).
 
 ## Tests
-`./backend/tests/run_all.sh` — Betfair is stubbed, so no network or
-credentials are needed. Run it before pushing backend changes.
+`bash backend/tests/run_all.sh` — Betfair is stubbed; no network or
+credentials. Runs as the first Cloud Build step; a failing, crashing or empty
+suite stops the deploy. No local builds — verify in Cloud Build.
 
 ## Claude Code Rules
-- Do NOT touch wrangler.jsonc or platform config
-- Scope: VSCode + GitHub only
-- Cloudflare Pages and Cloud Run handle their own deploys
+- Do NOT touch wrangler.jsonc
+- `main` only, never branch. README and CHANGELOG updated in every commit
+- Check the diff for secrets before every push
+- Never create a cloud resource without Charles approving its name first
+- Never start the Betfair session or place a real bet without asking

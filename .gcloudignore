@@ -1,0 +1,6 @@
+# Upload list for `gcloud builds submit`. Deliberately NOT the same list as
+# .dockerignore: backend/tests/ must be uploaded, or the test step finds
+# nothing to run.
+.gcloudignore
+.git
+#!include:.gitignore
