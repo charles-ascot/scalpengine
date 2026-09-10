@@ -7,9 +7,30 @@ Built from **CHI-SPC-002** (Chimera Scalping Strategy, April 2026) — Part A
 (strategy & business rules), Part B (global technical spec), Part C (bookmaker
 trigger extension).
 
-> **Trading software.** It places real money bets when `DRY_RUN=false`. Read
-> [Operational requirements](#operational-requirements) and
-> [Known limitations](#known-limitations) before going live.
+> **The engine cannot place bets.** It scans markets, scores candidates and
+> plans trades, but the execution loop is not built — nothing places, cancels
+> or closes an order, in dry run or live. Several dashboard controls are
+> therefore cosmetic. Read [Control status](#control-status) before relying
+> on any of them.
+
+## Control status
+
+`_manage_active_trades()` is a `TODO Phase 2` stub. Until the execution loop
+exists, any control that depends on it does nothing beyond changing a label.
+
+| Control | Claims to | Actually does |
+|---|---|---|
+| **Flatten** (Trades tab) | Close a position | Relabels the trade `STOPPING_OUT`. Cancels nothing, places nothing. |
+| **Dry run / Live** toggle | Switch to real money | Flips a flag nothing reads. No orders are placed in either mode. |
+| **Lock / Assisted** (Trades tab) | Take manual control | Changes the control-mode label. No execution code reads it. |
+| **Confirm** (Triggers tab) | Register a bookmaker bet and start its lay ladder | Records the confirmation. Creates no trade. |
+| **Kill switch** | Block new trades | Works — blocks new trade *plans*. Cannot cancel orders; none exist. |
+| **Start / Stop** | Run the scan loop | Works. |
+| **Risk limits, point value, ladder profile** | Size trades | Work, at planning time only. |
+| **Countries, process window** | Scope scanning | Work. |
+
+**No control in this dashboard can get you out of a position.** Betfair's own
+site is the only way to cancel or close a bet.
 
 ---
 
@@ -76,7 +97,7 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 | `BETFAIR_APP_KEY` | — | Betfair application key. Required. |
 | `FRONTEND_URL` | `https://scalping.thync.online` | CORS origin. **Must** be set to the real frontend domain. |
 | `GCS_BUCKET` | — | Bucket for state persistence (production: `chimera-scalping-state`). Without it, state dies with the container. |
-| `DRY_RUN` | `true` | `false` places real bets. **Overridden by persisted state — see [Configuration precedence](#configuration-precedence).** |
+| `DRY_RUN` | `true` | Intended to gate real orders. **Currently gates nothing** — see [Control status](#control-status). **Overridden by persisted state — see [Configuration precedence](#configuration-precedence).** |
 | `POLL_INTERVAL` | `15` | Seconds between scan cycles. |
 | `PROCESS_WINDOW_MINUTES` | `120` | How far ahead of the off to consider races. |
 | `REQUIRE_AUTH` | `false` | `true` closes the API to unauthenticated callers. See [Authentication](#authentication). |
@@ -154,15 +175,15 @@ Interactive docs at `/docs`; schema at `/openapi.json`.
 | `POST` | `/api/logout` | Revokes session token, clears Betfair client. |
 | `GET` | `/api/state` | Full dashboard state. |
 | `POST` | `/api/engine/start` \| `/stop` | Engine lifecycle. Start needs a Betfair session. |
-| `POST` | `/api/engine/dry-run` | Toggle dry-run. |
+| `POST` | `/api/engine/dry-run` | Toggle the dry-run flag. No effect until execution exists. |
 | `POST` | `/api/engine/point-value` \| `/countries` \| `/process-window` \| `/ladder-profile` | Tuning. |
 | `GET` | `/api/markets` \| `/api/candidates` | Discovery and scoring. |
 | `GET` | `/api/trades` \| `/api/trades/all` \| `/api/trades/{id}` | Trades. |
-| `POST` | `/api/trades/{id}/control` \| `/flatten` | Manual override, emergency flatten. |
+| `POST` | `/api/trades/{id}/control` \| `/flatten` | **Cosmetic.** Change the trade's label only; no orders cancelled or placed. |
 | `GET` | `/api/alerts` \| `/api/alerts/history` | Bookmaker trigger alerts. |
-| `POST` | `/api/alerts/{id}/confirm` \| `/dismiss` | Alert handling. |
+| `POST` | `/api/alerts/{id}/confirm` \| `/dismiss` | Confirm records the bet but creates no trade. |
 | `GET` | `/api/risk` | Risk config + live portfolio exposure. |
-| `POST` | `/api/risk/config` \| `/risk/kill-switch` | Risk controls. |
+| `POST` | `/api/risk/config` \| `/risk/kill-switch` | Risk limits and kill switch. Both gate new trade plans only. |
 | `GET` | `/api/positions` \| `/api/settlements` \| `/api/audit` \| `/api/sessions` | Reporting. |
 | `GET`/`POST` | `/api/keys` | Machine API keys. Key material returned once, on create. |
 
@@ -210,9 +231,10 @@ Without this the engine appears to run but scans only while someone is
 watching the dashboard. `--min-instances=1` also keeps the Betfair session
 alive continuously, since the loop's keepalive keeps renewing it.
 
-### Before trading live
+### API authentication
 
-Close the API to anonymous callers. Until this is set, `POST
+`REQUIRE_AUTH=true` has been set in production since 9 September 2026. For
+any new environment, set it before anything else — without it `POST
 /api/risk/kill-switch`, `POST /api/risk/config` and `POST /api/engine/dry-run`
 are reachable by anyone holding the Cloud Run URL:
 
@@ -234,6 +256,9 @@ Secret Manager and referencing it with `--set-secrets` before this service
 handles real money.
 
 ## Known limitations
+
+- **No execution loop.** See [Control status](#control-status). This is the
+  gap between the current engine and a tradeable one.
 
 - **Settlements are never recorded.** `settlements.append` is not called
   anywhere, so `/api/settlements` always returns empty and rolling P&L is

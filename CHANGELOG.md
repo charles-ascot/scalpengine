@@ -7,6 +7,31 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Documentation
+
+- **Corrected documentation of controls that do nothing.** The README and
+  the operator guide described Flatten as an emergency control. It is not:
+  `flatten_trade()` relabels the trade `STOPPING_OUT` and stops there, with
+  a `TODO Phase 2` where the cancel and closing orders should be. An audit
+  of every documented control found three more of the same kind:
+  - **Dry run / Live** — `dry_run` is read only by a log line and a session
+    label. Nothing places orders, so "Live" never meant real money.
+  - **Lock / Assisted** — `control_mode` is validated on change and read by
+    nothing else.
+  - **Confirm** on a trigger alert — records the confirmation, and a `TODO`
+    stands where the trade should be created.
+
+  The README now opens with a Control status table stating what each control
+  actually does, and the API reference marks the cosmetic endpoints. The
+  header claim that the engine "places real money bets when `DRY_RUN=false`"
+  was false and is removed.
+- Folded the previous Unreleased documentation entry into 1.2.0, where it
+  was committed; it had been left below that release.
+
+---
+
 ## [1.2.0] — 2026-09-09
 
 ### Fixed
@@ -38,12 +63,6 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   balance sizes the caps against a number that does not exist — the panel
   warns on any mismatch and offers a one-click correction.
 - `backend/tests/test_purge.py`, bringing the suite to 60 assertions.
-
----
-
-## [Unreleased]
-
-Documentation only — no code changes.
 
 ### Documentation
 
