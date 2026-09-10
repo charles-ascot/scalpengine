@@ -49,28 +49,41 @@ raw = open(os.environ["STATE_FILE"]).read()
 check("state file contains no password", "p" not in __import__("json").loads(raw).get("session", {}))
 check("state file has no 'password' key", "password" not in raw)
 
-print("\n[portfolio recompute]")
+print("\n[portfolio recompute — positions built from real fills]")
+# Positions come from PositionSnapshot via the same build_position the engine
+# uses, not hand-written dicts. Hand-written values here once hid a sign bug:
+# max_open_loss is negative for a loss, and exposure had been summed as-is.
+from execution import Fill, build_position
 e = ScalpEngine()
 today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def fill(tid, side, stake, price, i):
+    return Fill(fill_id=f"f{tid}{i}", order_id=f"o{tid}{i}", trade_id=tid, side=side,
+                price=price, stake=stake, venue="SIMULATED", occurred_at=f"{today}T10:0{i}:00+00:00")
 e.trades = {
-    "t1": {"trade_id": "t1", "market_id": "m1", "state": "OPEN",    "created_at": f"{today}T10:00:00+00:00"},
-    "t2": {"trade_id": "t2", "market_id": "m1", "state": "OPEN",    "created_at": f"{today}T10:05:00+00:00"},
+    "t1": {"trade_id": "t1", "market_id": "m1", "state": "LIVE_EXPOSED", "created_at": f"{today}T10:00:00+00:00"},
+    "t2": {"trade_id": "t2", "market_id": "m1", "state": "PARTIALLY_HEDGED", "created_at": f"{today}T10:05:00+00:00"},
     "t3": {"trade_id": "t3", "market_id": "m2", "state": "SETTLED", "created_at": f"{today}T09:00:00+00:00"},
 }
+# t1: back 10 @ 4.0, naked      -> win +28.50, lose -10.00 -> exposure 10
+# t2: back 10 @ 4.0, lay 5 @ 3.0 -> win +19.00, lose  -5.00 -> exposure  5
 e.positions = {
-    "t1": {"max_open_loss": 120.0, "unrealized_pnl": -10.0, "realized_pnl": 0.0,   "hedge_completion_pct": 50.0},
-    "t2": {"max_open_loss": 80.0,  "unrealized_pnl": 5.0,   "realized_pnl": 0.0,   "hedge_completion_pct": 100.0},
-    "t3": {"max_open_loss": 0.0,   "unrealized_pnl": 0.0,   "realized_pnl": -45.0, "hedge_completion_pct": 100.0},
+    "t1": build_position("t1", [fill("t1", "BACK", 10, 4.0, 1)]).to_dict(),
+    "t2": build_position("t2", [fill("t2", "BACK", 10, 4.0, 1), fill("t2", "LAY", 5, 3.0, 2)]).to_dict(),
+    "t3": {"realized_pnl": -45.0, "pnl_if_win": 0.0, "pnl_if_lose": 0.0, "max_open_loss": 0.0},
 }
+check("t1 position matches A.11 by hand", (e.positions["t1"]["pnl_if_win"], e.positions["t1"]["pnl_if_lose"]) == (28.5, -10.0),
+      str((e.positions["t1"]["pnl_if_win"], e.positions["t1"]["pnl_if_lose"])))
+check("t2 position matches A.11 by hand", (e.positions["t2"]["pnl_if_win"], e.positions["t2"]["pnl_if_lose"]) == (19.0, -5.0),
+      str((e.positions["t2"]["pnl_if_win"], e.positions["t2"]["pnl_if_lose"])))
 e._recompute_portfolio()
 p = e.portfolio_state
 check("open trades counted (settled excluded)", p.total_open_trades == 2, str(p.total_open_trades))
-check("total exposure summed", p.total_exposure == 200.0, str(p.total_exposure))
-check("unhedged only counts partial hedges", p.total_unhedged == 120.0, str(p.total_unhedged))
-check("unrealised P&L netted", p.daily_unrealised_pnl == -5.0, str(p.daily_unrealised_pnl))
+check("exposure is the positive magnitude of worst-case loss", p.total_exposure == 15.0, str(p.total_exposure))
+check("partial hedges count as unhedged (0..1 scale)", p.total_unhedged == 15.0, str(p.total_unhedged))
+check("drawdown input is worst case, not midpoint", p.daily_unrealised_pnl == -15.0, str(p.daily_unrealised_pnl))
 check("realised P&L from settled trade", p.daily_realised_pnl == -45.0, str(p.daily_realised_pnl))
-check("exposure grouped by market", p.exposure_by_market == {"m1": 200.0}, str(p.exposure_by_market))
-check("state API exposes real numbers", e.get_state()["portfolio"]["total_exposure"] == 200.0)
+check("exposure grouped by market", p.exposure_by_market == {"m1": 15.0}, str(p.exposure_by_market))
+check("state API exposes real numbers", e.get_state()["portfolio"]["total_exposure"] == 15.0)
 
 print("\n[Level-4 risk now actually fires]")
 before = check_portfolio_risk(100.0, __import__("risk_engine").PortfolioState(), e.risk_config)

@@ -25,7 +25,7 @@ exists, any control that depends on it does nothing beyond changing a label.
 | **Lock / Assisted** (Trades tab) | Take manual control | Changes the control-mode label. No execution code reads it. |
 | **Confirm** (Triggers tab) | Register a bookmaker bet and start its lay ladder | Records the confirmation. Creates no trade. |
 | **Kill switch** | Block new trades | Works — blocks new trade *plans*. Cannot cancel orders; none exist. |
-| **Start / Stop** | Run the scan loop | Works. |
+| **Start / Stop** | Run the scan loop | Works. Orders are only reconciled while it runs. |
 | **Risk limits, point value, ladder profile** | Size trades | Work, at planning time only. |
 | **Countries, process window** | Scope scanning | Work. |
 
@@ -64,6 +64,7 @@ cold starts that Cloud Run's scale-to-zero causes.
 |---|---|
 | `backend/main.py` | FastAPI app, routes, auth |
 | `backend/engine.py` | `ScalpEngine` — orchestration, scan loop, trade management |
+| `backend/execution.py` | Orders, fills, venues (real and simulated), reconciliation (B.14) |
 | `backend/state_machines.py` | Trade / order / control state machines (B.9) |
 | `backend/candidate.py` | Candidate scoring model (A.6) |
 | `backend/trade_planner.py` | Staged entry + lay ladders (A.7, A.9) |
@@ -104,6 +105,7 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 | `DRY_RUN` | `true` | Intended to gate real orders. **Currently gates nothing** — see [Control status](#control-status). **Overridden by persisted state — see [Configuration precedence](#configuration-precedence).** |
 | `POLL_INTERVAL` | `15` | Seconds between scan cycles. |
 | `PROCESS_WINDOW_MINUTES` | `120` | How far ahead of the off to consider races. |
+| `LIVE_ORDERS_ENABLED` | `false` | Real-money interlock. While `false` the Betfair venue refuses every order, whatever the dashboard's dry-run flag says. Locked in `cloudbuild.yaml`. |
 | `REQUIRE_AUTH` | `false` | `true` closes the API to unauthenticated callers. See [Authentication](#authentication). |
 
 ### Frontend (Cloudflare Pages)
@@ -111,6 +113,49 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 | Variable | Purpose |
 |---|---|
 | `VITE_API_URL` | Cloud Run backend URL. Baked in at build time — changing it needs a rebuild. |
+
+## Execution
+
+Stage 1 of the execution loop (see the CHI-SPC-002 build order): the engine can
+place, track and reconcile orders, and knows what matched. Nothing places
+orders automatically yet — that is Stage 2.
+
+- **Two venues, one interface.** In dry run, orders go to a simulated venue;
+  otherwise to Betfair. Both report order state in Betfair's own
+  `listCurrentOrders` shape, so reconciliation and position building are the
+  same code either way.
+- **The real venue has its own interlock.** It refuses every order unless
+  `LIVE_ORDERS_ENABLED=true`, independently of the dashboard's dry-run flag.
+  Real money therefore needs a reviewed change to `cloudbuild.yaml`, not a
+  click.
+- **Reconciliation** runs every scan. It turns changes in matched stake into
+  fill records, and flags a trade `needs_review` when the venue disagrees with
+  what the engine intended — an order missing, a forbidden state change, a
+  voided bet.
+- **Positions are rebuilt from fills**, never accumulated, so a restart or a
+  repeated poll cannot double-count.
+- **Every order carries its trade ID and strategy version** (Betfair
+  `customerOrderRef` / `customerStrategyRef`). If a placement times out, the
+  order is neither assumed placed nor assumed failed: it is looked up by
+  reference, and rejected only after three polls fail to find it.
+
+### How the dry run simulates
+
+Real Betfair prices, simulated matching, nothing placed. The fill model is
+deliberately conservative, so a dry run never looks better than the market
+would have allowed:
+
+- An order matches on placement against displayed liquidity that crosses its
+  price, best first, at those prices.
+- A resting order fills later only when the market trades *through* it, and
+  then at its own price. Queue position at the order's own price is never
+  assumed.
+- Displayed liquidity is never reused — not across polls, and not between our
+  own orders in the same poll.
+- Unmatched stake lapses at the off, as Betfair's `LAPSE` persistence does.
+  Suspension changes nothing. In-play placement is refused rather than
+  simulated without the in-play bet delay.
+- If prices cannot be fetched, nothing is filled.
 
 ## Configuration precedence
 
@@ -189,6 +234,8 @@ Interactive docs at `/docs`; schema at `/openapi.json`.
 | `GET` | `/api/risk` | Risk config + live portfolio exposure. |
 | `POST` | `/api/risk/config` \| `/risk/kill-switch` | Risk limits and kill switch. Both gate new trade plans only. |
 | `GET` | `/api/positions` \| `/api/settlements` \| `/api/audit` \| `/api/sessions` | Reporting. |
+| `GET` | `/api/orders` \| `/api/fills` | Orders and fills, optionally `?trade_id=`. |
+| `POST` | `/api/trades/{id}/manual-order` | Manual order. **Dry run only** for now; needs a running engine. |
 | `GET`/`POST` | `/api/keys` | Machine API keys. Key material returned once, on create. |
 
 ## Tests
@@ -263,8 +310,14 @@ No secret belongs in this repository. `.env` is gitignored.
 
 ## Known limitations
 
-- **No execution loop.** See [Control status](#control-status). This is the
-  gap between the current engine and a tradeable one.
+- **No automated execution yet.** Orders can be placed and reconciled (Stage 1),
+  but nothing places them automatically, and nothing exits a position.
+  See [Control status](#control-status).
+- **Reconciliation only runs while the engine runs.** A stopped engine does not
+  track orders.
+- **`PositionSnapshot.unrealized_pnl` is a midpoint proxy** — the average of
+  win and lose outcomes, not a mark to market. Risk no longer reads it: the
+  daily drawdown input is the worst case.
 
 - **Settlements are never recorded.** `settlements.append` is not called
   anywhere, so `/api/settlements` always returns empty and rolling P&L is

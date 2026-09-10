@@ -23,6 +23,7 @@ Built from CHI-SPC-002 (Chimera Scalping Strategy, April 2026):
 - `backend/position.py` — Position & P&L tracking (B.15)
 - `backend/bookmaker_trigger.py` — Bookmaker trigger extension (Part C)
 - `backend/betfair_client.py` — Extended Betfair API client (back/lay/cancel/replace/depth)
+- `backend/execution.py` — Orders, fills, real/simulated venues, reconciliation (B.14)
 - `backend/main.py` — FastAPI server
 
 ## Deploy
@@ -43,6 +44,7 @@ Built from CHI-SPC-002 (Chimera Scalping Strategy, April 2026):
 - DRY_RUN (true/false)
 - POLL_INTERVAL (seconds, default 15)
 - REQUIRE_AUTH (true/false, default false — closes the API to unauthenticated callers)
+- LIVE_ORDERS_ENABLED (default false — real-money interlock; the Betfair venue refuses all orders while false. Never flip without Charles)
 
 ## Cloud Run Settings
 Locked in `cloudbuild.yaml`: `--min-instances=1 --max-instances=1

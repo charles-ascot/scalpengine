@@ -49,6 +49,10 @@ steps:
   # first on the GCS state files, and once execution exists it would place
   # duplicate orders.
   #
+  # LIVE_ORDERS_ENABLED=false is the real-money interlock. With it false the
+  # Betfair venue refuses every order, whatever the dashboard's dry-run flag
+  # says. Going live means changing it here, in a reviewed commit.
+  #
   # Public access is IAM on the service, not a deploy flag, so it is left
   # untouched here. Recreating the service from scratch would need
   # --allow-unauthenticated added once.
@@ -72,7 +76,7 @@ steps:
       - --max-instances=1
       - --no-cpu-throttling
       - --cpu-boost
-      - --set-env-vars=FRONTEND_URL=https://scalpengine.thync.online,GCS_BUCKET=chimera-scalping-state,REQUIRE_AUTH=true
+      - --set-env-vars=FRONTEND_URL=https://scalpengine.thync.online,GCS_BUCKET=chimera-scalping-state,REQUIRE_AUTH=true,LIVE_ORDERS_ENABLED=false
       - --set-secrets=BETFAIR_APP_KEY=scalpengine-betfair-app-key:latest
       - --labels=managed-by=cloudbuild-yaml,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID
       - --quiet

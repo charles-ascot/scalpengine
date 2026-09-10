@@ -39,7 +39,10 @@ class PositionSnapshot:
         """Recalculate P&L from current fills."""
         c = BETFAIR_COMMISSION
 
-        if self.gross_back_stake <= 0:
+        # A lay can be matched before its back is recorded (or with none at
+        # all); the exchange formula below handles S = 0 correctly, so only
+        # skip when nothing is matched on either side.
+        if self.gross_back_stake <= 0 and self.gross_lay_stake <= 0:
             return
 
         if self.entry_source == "BOOKMAKER":

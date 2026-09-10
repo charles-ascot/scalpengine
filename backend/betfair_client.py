@@ -371,63 +371,8 @@ class BetfairClient:
     #  ORDER PLACEMENT
     # ──────────────────────────────────────────────
 
-    def place_lay_order(
-        self,
-        market_id: str,
-        selection_id: int,
-        price: float,
-        size: float,
-    ) -> dict:
-        """
-        Place a single LAY order on Betfair.
-        Returns the instruction report from Betfair.
-
-        FIX: Betfair Exchange API expects:
-          - selectionId: integer (long)
-          - handicap: number
-          - size: number (double)
-          - price: number (double)
-        NOT strings. Sending strings causes silent rejection.
-        """
-        params = {
-            "marketId": market_id,
-            "instructions": [
-                {
-                    "selectionId": int(selection_id),
-                    "handicap": 0,
-                    "side": "LAY",
-                    "orderType": "LIMIT",
-                    "limitOrder": {
-                        "size": round(float(size), 2),
-                        "price": round(float(price), 2),
-                        "persistenceType": "LAPSE",
-                    },
-                }
-            ],
-        }
-
-        result = self._api_call("placeOrders", params)
-        if result is None:
-            return {"status": "FAILURE", "error": "API call returned None"}
-
-        status = result.get("status", "FAILURE")
-        reports = result.get("instructionReports", [])
-
-        if status == "SUCCESS" and reports:
-            report = reports[0]
-            return {
-                "status": report.get("status", "UNKNOWN"),
-                "bet_id": report.get("betId"),
-                "placed_date": report.get("placedDate"),
-                "avg_price_matched": report.get("averagePriceMatched", 0),
-                "size_matched": report.get("sizeMatched", 0),
-                "error_code": report.get("errorCode"),
-            }
-        else:
-            return {
-                "status": "FAILURE",
-                "error_code": result.get("errorCode", "UNKNOWN"),
-            }
+    def place_lay_order(self, market_id: str, selection_id: int, price: float, size: float, **refs) -> Optional[dict]:
+        return self.place_order(market_id, selection_id, "LAY", price, size, **refs)
 
     # ──────────────────────────────────────────────
     #  ACCOUNT API
@@ -559,54 +504,74 @@ class BetfairClient:
     #  SCALPING EXTENSIONS: BACK ORDERS, CANCEL, REPLACE, DEPTH
     # ──────────────────────────────────────────────
 
-    def place_back_order(
+    def place_order(
         self,
         market_id: str,
         selection_id: int,
+        side: str,
         price: float,
         size: float,
-    ) -> dict:
-        """Place a BACK order on Betfair Exchange."""
-        params = {
-            "marketId": market_id,
-            "instructions": [{
-                "selectionId": str(selection_id),
-                "handicap": "0",
-                "side": "BACK",
-                "orderType": "LIMIT",
-                "limitOrder": {
-                    "size": str(round(size, 2)),
-                    "price": str(round(price, 2)),
-                    "persistenceType": "LAPSE",
-                },
-            }],
+        customer_order_ref: Optional[str] = None,
+        customer_strategy_ref: Optional[str] = None,
+        customer_ref: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Place one LIMIT order with LAPSE persistence.
+
+        Returns None when the call itself failed. In that case the order may or
+        may not exist at Betfair, so the caller must reconcile (by
+        customer_order_ref) before assuming either — never blindly retry.
+        customer_ref makes a mistaken re-submission a no-op at Betfair.
+
+        Numbers must be sent as numbers: Betfair silently rejects string
+        prices and sizes.
+        """
+        instruction = {
+            "selectionId": int(selection_id),
+            "handicap": 0,
+            "side": side,
+            "orderType": "LIMIT",
+            "limitOrder": {
+                "size": round(float(size), 2),
+                "price": round(float(price), 2),
+                "persistenceType": "LAPSE",
+            },
         }
+        if customer_order_ref:
+            instruction["customerOrderRef"] = customer_order_ref
+        params = {"marketId": market_id, "instructions": [instruction]}
+        if customer_ref:
+            params["customerRef"] = customer_ref
+        if customer_strategy_ref:
+            params["customerStrategyRef"] = customer_strategy_ref
+
         result = self._api_call("placeOrders", params)
         if result is None:
-            return {"status": "ERROR", "error_code": "API_CALL_FAILED"}
+            return None
 
-        status = result.get("status", "FAILURE")
-        if status == "SUCCESS":
-            reports = result.get("instructionReports", [{}])
-            report = reports[0] if reports else {}
+        reports = result.get("instructionReports") or [{}]
+        report = reports[0]
+        if result.get("status") == "SUCCESS":
             return {
                 "status": "SUCCESS",
                 "bet_id": report.get("betId"),
                 "placed_date": report.get("placedDate"),
-                "size_matched": float(report.get("sizeMatched", 0)),
-                "average_price_matched": float(report.get("averagePriceMatched", 0)),
-                "side": "BACK",
+                "order_status": report.get("orderStatus"),
+                "size_matched": float(report.get("sizeMatched", 0) or 0),
+                "avg_price_matched": float(report.get("averagePriceMatched", 0) or 0),
             }
         return {
-            "status": "ERROR",
-            "error_code": result.get("errorCode", "UNKNOWN"),
+            "status": "FAILURE",
+            "error_code": report.get("errorCode") or result.get("errorCode", "UNKNOWN"),
         }
+
+    def place_back_order(self, market_id: str, selection_id: int, price: float, size: float, **refs) -> Optional[dict]:
+        return self.place_order(market_id, selection_id, "BACK", price, size, **refs)
 
     def cancel_order(self, market_id: str, bet_id: str, size_reduction: float = None) -> dict:
         """Cancel or reduce an existing order."""
         instruction = {"betId": bet_id}
         if size_reduction is not None:
-            instruction["sizeReduction"] = str(round(size_reduction, 2))
+            instruction["sizeReduction"] = round(float(size_reduction), 2)
 
         params = {
             "marketId": market_id,
@@ -636,7 +601,7 @@ class BetfairClient:
             "marketId": market_id,
             "instructions": [{
                 "betId": bet_id,
-                "newPrice": str(round(new_price, 2)),
+                "newPrice": round(float(new_price), 2),
             }],
         }
         result = self._api_call("replaceOrders", params)
@@ -700,14 +665,34 @@ class BetfairClient:
             ],
         }
 
-    def get_current_orders(self, market_id: str = None) -> list[dict]:
-        """Fetch current (unmatched/partially matched) orders."""
-        params = {}
-        if market_id:
-            params["marketIds"] = [market_id]
+    def get_current_orders(
+        self,
+        market_ids: Optional[list[str]] = None,
+        bet_ids: Optional[list[str]] = None,
+        customer_order_refs: Optional[list[str]] = None,
+    ) -> Optional[list[dict]]:
+        """Current orders (executable, plus complete ones not yet settled).
 
-        result = self._api_call("listCurrentOrders", params)
-        if result is None:
-            return []
+        Returns None if the call failed. That must stay distinct from an empty
+        list: a network blip is not evidence that every order has vanished.
+        Follows moreAvailable so large books are not silently truncated.
+        """
+        params: dict = {"orderProjection": "ALL"}
+        if market_ids:
+            params["marketIds"] = list(market_ids)
+        if bet_ids:
+            params["betIds"] = list(bet_ids)
+        if customer_order_refs:
+            params["customerOrderRefs"] = list(customer_order_refs)
 
-        return result.get("currentOrders", [])
+        orders: list[dict] = []
+        from_record = 0
+        while True:
+            result = self._api_call("listCurrentOrders", {**params, "fromRecord": from_record})
+            if result is None:
+                return None
+            page = result.get("currentOrders", [])
+            orders.extend(page)
+            if not result.get("moreAvailable") or not page:
+                return orders
+            from_record += len(page)

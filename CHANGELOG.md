@@ -9,7 +9,58 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-### Added
+### Added — execution loop, Stage 1
+
+- **Orders, fills and reconciliation** (`backend/execution.py`, B.14). The
+  engine can now place an order, poll its state, turn changes in matched stake
+  into fill records, and rebuild the trade's position from those fills. Orders
+  and fills persist with the trades.
+- **A dry run that genuinely simulates.** Orders placed in dry run go to a
+  simulated venue that matches against real Betfair prices and places
+  nothing. Before this, dry run gated nothing because nothing placed orders.
+  The fill model is conservative by design — no assumed queue position, no
+  reused liquidity, resting fills at the order's own price — so a dry run
+  cannot look better than the market would have allowed.
+- **`LIVE_ORDERS_ENABLED` interlock**, set `false` in `cloudbuild.yaml`. While
+  false the Betfair venue refuses every order regardless of the dashboard's
+  dry-run flag, so going live is a reviewed commit rather than a click.
+- **Unconfirmed submissions are reconciled, not guessed.** A placement that
+  times out may or may not exist at Betfair. It is now looked up by
+  `customerOrderRef` and declared not placed only after three polls, and
+  `customerRef` makes a mistaken re-submission a no-op at Betfair.
+- `GET /api/orders`, `GET /api/fills`, and `POST
+  /api/trades/{id}/manual-order` — dry run only for now, as the harness for
+  exercising the simulated venue against live prices.
+- `backend/tests/test_execution.py`: 57 assertions; the suite is now 119.
+
+### Fixed — found while building Stage 1
+
+- **`place_back_order` sent numbers as strings.** `place_lay_order`'s own
+  docstring records that Betfair silently rejects string prices and sizes; it
+  had been fixed for lays and never for backs. Every automated entry would
+  have been refused. Cancel and replace had the same fault. Placement is now
+  one `place_order` implementation.
+- **No order carried a trade ID or strategy version**, which spec A.12
+  requires and which reconciliation after a timeout depends on.
+- **`get_current_orders` returned `[]` on failure**, so a network blip looked
+  identical to every order vanishing. It now returns `None`, and follows
+  `moreAvailable` rather than silently truncating.
+- **Lay-only positions were reported as flat.** `recalculate()` returned
+  early whenever no back had matched.
+- **Portfolio exposure had the wrong sign.** `max_open_loss` is negative for a
+  loss and was summed as-is, so real exposure would have read negative and
+  the capital utilisation cap could never fire. Hedge completion, a 0–1
+  fraction, was compared against 100. Neither showed because no position had
+  ever held stake; the portfolio test had used hand-written values with the
+  wrong sign, and now builds positions from real fills.
+
+### Changed
+
+- **Daily drawdown now uses each position's worst case**, not
+  `PositionSnapshot`'s midpoint proxy. Under the midpoint, a naked £10 back
+  counted as roughly +£9 unrealised — offsetting real losses and making the
+  cap fire late. It now counts as −£10. The cap will fire earlier than before.
+
 
 - **`cloudbuild.yaml`** — tests, build and deploy, with every Cloud Run flag
   locked in the repo. The service was deployed by a Cloud Run wizard trigger

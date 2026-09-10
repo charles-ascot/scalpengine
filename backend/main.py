@@ -115,6 +115,12 @@ class RiskConfigUpdate(BaseModel):
     kill_switch_enabled: bool = None
     flatten_only_mode: bool = None
 
+class ManualOrderRequest(BaseModel):
+    side: str              # BACK / LAY
+    price: float
+    size: float
+    reason: str = ""
+
 class LadderProfileRequest(BaseModel):
     profile: str           # VERY_DEFENSIVE / DEFENSIVE / BALANCED
 
@@ -459,3 +465,49 @@ def list_api_keys():
             for k in engine.api_keys
         ]
     }
+
+
+# ── Orders & Fills (B.14) ──
+
+@app.get("/api/orders", dependencies=[Depends(require_auth)])
+def list_orders(trade_id: str = Query(None)):
+    orders = engine.order_manager.orders.values()
+    if trade_id:
+        orders = [o for o in orders if o.trade_id == trade_id]
+    return {"orders": sorted((o.to_dict() for o in orders), key=lambda o: o["created_at"], reverse=True)}
+
+
+@app.get("/api/fills", dependencies=[Depends(require_auth)])
+def list_fills(trade_id: str = Query(None)):
+    fills = engine.order_manager.fills
+    if trade_id:
+        fills = [f for f in fills if f.trade_id == trade_id]
+    return {"fills": [f.to_dict() for f in reversed(fills)]}
+
+
+@app.post("/api/trades/{trade_id}/manual-order", dependencies=[Depends(require_auth)])
+def manual_order(trade_id: str, req: ManualOrderRequest):
+    """Place a manual order against a trade (B.16).
+
+    Dry run only until the execution stages that manage live orders exist:
+    this is how the simulated venue is exercised against real prices. It
+    requires a running engine, because only the scan loop reconciles orders.
+    """
+    if not engine.dry_run:
+        return JSONResponse(status_code=409, content={
+            "status": "error",
+            "message": "Manual orders are dry-run only until live order management is built.",
+        })
+    if engine.status != "RUNNING":
+        return JSONResponse(status_code=409, content={
+            "status": "error",
+            "message": "Start the engine first — only a running engine reconciles orders.",
+        })
+    side = req.side.upper()
+    if side not in ("BACK", "LAY"):
+        raise HTTPException(status_code=400, detail="side must be BACK or LAY")
+    order, error = engine.submit_order(trade_id, side, req.price, req.size,
+                                       source="MANUAL", user_id="operator")
+    if order is None:
+        raise HTTPException(status_code=404, detail=error)
+    return {"status": "ok", "order": order.to_dict()}

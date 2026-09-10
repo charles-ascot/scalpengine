@@ -34,6 +34,7 @@ from typing import Optional
 
 from betfair_client import BetfairClient
 from fsu_client import FSUClient
+from execution import BetfairVenue, OrderManager, SimulatedVenue, build_position
 from candidate import (
     CandidateScore, QualificationConfig, qualify_candidate,
     compute_favourite_persistence, compute_first_lay_hit_prob,
@@ -181,6 +182,13 @@ class ScalpEngine:
         # ── Monitoring ──
         self.monitoring: dict = {}   # market_id → [snapshots]
 
+        # ── Execution (B.14) ──
+        # Venues read self.client at call time, so they follow logins and logouts.
+        self.order_manager = OrderManager({
+            "BETFAIR": BetfairVenue(lambda: self.client),
+            "SIMULATED": SimulatedVenue(self._sim_market_book),
+        })
+
         # Load state
         self._load_state()
         self._load_sessions()
@@ -256,10 +264,13 @@ class ScalpEngine:
 
     def _save_trades(self):
         try:
+            orders, fills = self.order_manager.dump()
             data = {
                 "trades": self.trades,
                 "trade_plans": self.trade_plans,
                 "positions": self.positions,
+                "orders": orders,
+                "fills": fills,
                 "settlements": self.settlements[-200:],
                 "active_alerts": self.active_alerts[-50:],
                 "alert_history": self.alert_history[-500:],
@@ -289,6 +300,7 @@ class ScalpEngine:
             self.alert_history = data.get("alert_history", [])
             self.confirmations = data.get("confirmations", [])
             self.state_transitions = data.get("state_transitions", [])
+            self.order_manager.load(data.get("orders", []), data.get("fills", []))
             logger.info(f"Loaded {len(self.trades)} trades, {len(self.active_alerts)} active alerts")
         except Exception as e:
             logger.warning(f"Failed to load trades: {e}")
@@ -448,9 +460,12 @@ class ScalpEngine:
         now = datetime.now(timezone.utc)
         self.last_scan = now.isoformat()
         self._purge_stale_trades()
-        self._recompute_portfolio()
 
-        if not self.client.ensure_session():
+        session_ok = self.client.ensure_session()
+        if session_ok:
+            self._reconcile_orders()     # fills first, so risk sees current exposure
+        self._recompute_portfolio()
+        if not session_ok:
             return
 
         # Refresh markets
@@ -957,7 +972,10 @@ class ScalpEngine:
             closed = {"SETTLED", "CANCELLED", "ERROR"}
             drop = []
 
+            with_orders = {o.trade_id for o in self.order_manager.orders.values()}
             for trade_id, trade in self.trades.items():
+                if trade_id in with_orders:
+                    continue   # has venue history — kept until settlement archives it
                 state = trade.get("state")
                 if state == "PLANNED":
                     # Never committed money, and the race has already run
@@ -981,6 +999,61 @@ class ScalpEngine:
             logger.warning(f"Trade purge failed: {e}")
             return 0
 
+    # ──────────────────────────────────────────────
+    #  EXECUTION (B.14)
+    # ──────────────────────────────────────────────
+
+    def _sim_market_book(self, market_id: str) -> Optional[dict]:
+        """Real prices for the simulated venue. None if they cannot be read."""
+        return self.client.get_market_book(market_id) if self.client else None
+
+    def _rebuild_position(self, trade_id: str):
+        entry_source = (self.trade_plans.get(trade_id) or {}).get("entry_source", "EXCHANGE")
+        pos = build_position(trade_id, self.order_manager.fills_for(trade_id), entry_source)
+        realised = (self.positions.get(trade_id) or {}).get("realized_pnl", 0.0)
+        pos.realized_pnl = realised     # set by settlement, not by fills
+        self.positions[trade_id] = pos.to_dict()
+
+    def _drain_order_events(self) -> set:
+        """Move order audit events into the trade log; mark flagged trades."""
+        self.state_transitions.extend(self.order_manager.events)
+        self.order_manager.events = []
+        flagged = dict(self.order_manager.flagged)
+        self.order_manager.flagged = {}
+        for trade_id, reason in flagged.items():
+            if trade_id in self.trades:
+                self.trades[trade_id]["needs_review"] = reason
+        return set(flagged)
+
+    def _reconcile_orders(self):
+        try:
+            new_fills = self.order_manager.reconcile()
+            touched = {f.trade_id for f in new_fills} | self._drain_order_events()
+            for trade_id in touched:
+                self._rebuild_position(trade_id)
+            if new_fills:
+                logger.info(f"Reconcile: {len(new_fills)} new fills across {len(touched)} trades")
+                self._save_trades()
+        except Exception as e:
+            logger.error(f"Order reconciliation failed: {e}")
+
+    def submit_order(self, trade_id: str, side: str, price: float, size: float,
+                     source: str = "AUTO", rung: Optional[int] = None,
+                     user_id: Optional[str] = None):
+        """Route an order to the simulated venue in dry run, else to Betfair."""
+        trade = self.trades.get(trade_id)
+        if trade is None:
+            return None, "Trade not found"
+        order = self.order_manager.submit(
+            trade_id=trade_id, market_id=trade["market_id"],
+            selection_id=trade["selection_id"], side=side, price=price, size=size,
+            simulated=self.dry_run, source=source, rung=rung, user_id=user_id,
+        )
+        self._drain_order_events()
+        self._rebuild_position(trade_id)
+        self._save_trades()
+        return order, ""
+
     def _recompute_portfolio(self):
         """Rebuild portfolio_state from live trades and positions (B.13 Level 4).
 
@@ -999,6 +1072,7 @@ class ScalpEngine:
             for trade_id, trade in self.trades.items():
                 pos = self.positions.get(trade_id) or {}
                 realised = float(pos.get("realized_pnl") or 0.0)
+                worst = min(float(pos.get("pnl_if_win") or 0.0), float(pos.get("pnl_if_lose") or 0.0))
                 p.rolling_pnl += realised
                 if str(trade.get("created_at") or "")[:10] == today:
                     p.daily_realised_pnl += realised
@@ -1006,11 +1080,15 @@ class ScalpEngine:
                 if trade.get("state") in closed:
                     continue
 
-                exposure = float(pos.get("max_open_loss") or 0.0)
+                # max_open_loss is signed (negative = a loss); exposure is how
+                # much could be lost, so it is the magnitude of the downside.
+                exposure = max(0.0, -float(pos.get("max_open_loss") or 0.0))
                 p.total_open_trades += 1
                 p.total_exposure += exposure
-                p.daily_unrealised_pnl += float(pos.get("unrealized_pnl") or 0.0)
-                if float(pos.get("hedge_completion_pct") or 0.0) < 100.0:
+                # Worst case, not PositionSnapshot's midpoint proxy: a naked
+                # back must count against the drawdown cap, not offset it.
+                p.daily_unrealised_pnl += worst
+                if float(pos.get("hedge_completion_pct") or 0.0) < 1.0:   # 0..1 fraction
                     p.total_unhedged += exposure
 
                 market_id = trade.get("market_id") or "unknown"
@@ -1036,6 +1114,7 @@ class ScalpEngine:
             "status": self.status,
             "dry_run": self.dry_run,
             "balance": self.balance,
+            "open_orders": sum(1 for o in self.order_manager.orders.values() if o.is_open),
             "countries": self.countries,
             "process_window": self.process_window,
             "point_value": self.point_value,
