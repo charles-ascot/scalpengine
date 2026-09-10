@@ -9,6 +9,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- **Disabled the four controls that do nothing.** Flatten, Lock / Assisted /
+  Auto, Confirm Bet and the Dry run / Live toggle looked fully functional in
+  the dashboard while doing nothing beyond changing a label. They are now
+  disabled, drawn with a dashed border, and carry a tooltip explaining why —
+  Flatten's reads "Close positions on Betfair directly". They stay visible
+  rather than hidden so an operator knows the control exists and is not
+  surprised by its absence. Each is re-enabled when the execution stage that
+  backs it lands.
+
 ### Documentation
 
 - **Corrected documentation of controls that do nothing.** The README and

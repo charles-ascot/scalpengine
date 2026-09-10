@@ -97,6 +97,16 @@ tr:hover td { background: var(--bg-elevated); }
 .btn-green:hover { background: var(--green); color: white; }
 .btn-sm { padding: 4px 10px; font-size: 10px; }
 
+/* Controls whose backend is not built yet: visible, clearly inert.
+   :disabled:hover outranks the colour variants' own :hover rules. */
+.btn:disabled,
+.btn:disabled:hover {
+  background: transparent; color: var(--text-muted);
+  border-color: var(--text-muted); border-style: dashed;
+  cursor: not-allowed; opacity: 0.6;
+}
+.not-built { display: inline-flex; }
+
 /* ── Inputs ── */
 input, select {
   padding: 8px 12px; background: var(--bg-primary); border: 1px solid var(--border);

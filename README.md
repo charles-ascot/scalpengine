@@ -29,6 +29,10 @@ exists, any control that depends on it does nothing beyond changing a label.
 | **Risk limits, point value, ladder profile** | Size trades | Work, at planning time only. |
 | **Countries, process window** | Scope scanning | Work. |
 
+The four cosmetic controls are disabled in the dashboard, drawn with a dashed
+border, and carry a tooltip saying why. Each is re-enabled when the execution
+stage that backs it is built.
+
 **No control in this dashboard can get you out of a position.** Betfair's own
 site is the only way to cancel or close a bet.
 

@@ -26,6 +26,13 @@ const fmtTime = (iso, withSeconds = false) => {
 const hhmm = iso => fmtTime(iso)
 const hhmmss = iso => fmtTime(iso, true)
 
+// Controls whose backend does nothing yet — see README "Control status".
+// Shown disabled rather than hidden, so the operator knows the control exists
+// and why it cannot be used. Remove the wrapper as each execution stage lands.
+const NotBuilt = ({ why, children }) => (
+  <span className="not-built" title={`Not built yet — ${why}`}>{children}</span>
+)
+
 // Session token is issued by /api/login and required once the backend runs
 // with REQUIRE_AUTH=true. Storage can throw in private-browsing modes.
 const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) } catch { return null } }
@@ -229,10 +236,10 @@ function TradesTab() {
           </div>
 
           <div style={{ display: 'flex', gap: 8 }}>
-            {t.control_mode !== 'AUTO' && <button className="btn btn-sm btn-green" onClick={() => doControl(t.trade_id, 'AUTO')}>Auto</button>}
-            {t.control_mode !== 'ASSISTED' && <button className="btn btn-sm" onClick={() => doControl(t.trade_id, 'ASSISTED')}>Assisted</button>}
-            {t.control_mode !== 'MANUAL_LOCK' && <button className="btn btn-sm btn-red" onClick={() => doControl(t.trade_id, 'MANUAL_LOCK')}>Lock</button>}
-            <button className="btn btn-sm btn-red" onClick={() => doFlatten(t.trade_id)}>Flatten</button>
+            {t.control_mode !== 'AUTO' && <NotBuilt why="control modes are recorded, but nothing acts on them until the execution loop exists."><button className="btn btn-sm btn-green" disabled onClick={() => doControl(t.trade_id, 'AUTO')}>Auto</button></NotBuilt>}
+            {t.control_mode !== 'ASSISTED' && <NotBuilt why="control modes are recorded, but nothing acts on them until the execution loop exists."><button className="btn btn-sm" disabled onClick={() => doControl(t.trade_id, 'ASSISTED')}>Assisted</button></NotBuilt>}
+            {t.control_mode !== 'MANUAL_LOCK' && <NotBuilt why="control modes are recorded, but nothing acts on them until the execution loop exists."><button className="btn btn-sm btn-red" disabled onClick={() => doControl(t.trade_id, 'MANUAL_LOCK')}>Lock</button></NotBuilt>}
+            <NotBuilt why="Flatten only relabels the trade. Close positions on Betfair directly."><button className="btn btn-sm btn-red" disabled onClick={() => doFlatten(t.trade_id)}>Flatten</button></NotBuilt>
           </div>
         </div>
       ))}
@@ -302,7 +309,7 @@ function AlertsTab() {
             </div>
           ) : (
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn btn-sm btn-gold" onClick={() => setConfirmId(a.alert_id)}>Confirm Bet</button>
+              <NotBuilt why="confirming records the bet but creates no trade and starts no lay ladder."><button className="btn btn-sm btn-gold" disabled onClick={() => setConfirmId(a.alert_id)}>Confirm Bet</button></NotBuilt>
               <button className="btn btn-sm" onClick={() => doDismiss(a.alert_id)}>Dismiss</button>
             </div>
           )}
@@ -552,9 +559,11 @@ function ControlsBar({ state, onReload }) {
       ) : (
         <button className="btn btn-green btn-sm" onClick={doStart}>Start</button>
       )}
-      <button className={`btn btn-sm ${state?.dry_run ? '' : 'btn-red'}`} onClick={doDryRun}>
-        {state?.dry_run ? 'DRY RUN' : 'LIVE'}
-      </button>
+      <NotBuilt why="no orders are placed in either mode.">
+        <button className={`btn btn-sm ${state?.dry_run ? '' : 'btn-red'}`} disabled onClick={doDryRun}>
+          {state?.dry_run ? 'DRY RUN' : 'LIVE'}
+        </button>
+      </NotBuilt>
     </div>
   )
 }
