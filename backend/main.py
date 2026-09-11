@@ -309,15 +309,31 @@ def get_candidates():
 
 # ── Trades ──
 
+def _trade_view(tid: str, t: dict) -> dict:
+    """A trade plus its stage progress and live position, for the dashboard."""
+    pos = engine.positions.get(tid) or {}
+    plan = engine.trade_plans.get(tid) or {}
+    return {
+        **t,
+        "position": {k: pos.get(k) for k in (
+            "gross_back_stake", "avg_back_odds", "gross_lay_stake", "avg_lay_odds",
+            "pnl_if_win", "pnl_if_lose", "max_open_loss")},
+        "stages": [{k: st.get(k) for k in (
+            "stage_no", "mode", "planned_stake", "executed", "actual_stake",
+            "actual_price", "skipped", "last_block")} for st in plan.get("entry_stages", [])],
+    }
+
+
 @app.get("/api/trades", dependencies=[Depends(require_auth)])
 def get_trades():
-    active = {tid: t for tid, t in engine.trades.items()
+    active = {tid: _trade_view(tid, t) for tid, t in engine.trades.items()
               if t.get("state") not in ("SETTLED", "CANCELLED", "ERROR")}
     return {"trades": active, "count": len(active)}
 
 @app.get("/api/trades/all", dependencies=[Depends(require_auth)])
 def get_all_trades():
-    return {"trades": engine.trades, "count": len(engine.trades)}
+    return {"trades": {tid: _trade_view(tid, t) for tid, t in engine.trades.items()},
+            "count": len(engine.trades)}
 
 @app.get("/api/trades/{trade_id}", dependencies=[Depends(require_auth)])
 def get_trade(trade_id: str):

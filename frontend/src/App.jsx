@@ -29,6 +29,42 @@ const hhmmss = iso => fmtTime(iso, true)
 // Controls whose backend does nothing yet — see README "Control status".
 // Shown disabled rather than hidden, so the operator knows the control exists
 // and why it cannot be used. Remove the wrapper as each execution stage lands.
+// Staged entry progress and live position for one trade card.
+const money = v => (v == null ? '—' : `£${Number(v).toFixed(2)}`)
+function StageStrip({ t }) {
+  const stages = t.stages || []
+  const pos = t.position || {}
+  if (!stages.length && !pos.gross_back_stake) return null
+  const label = st =>
+    st.actual_stake > 0 ? `${money(st.actual_stake)} @ ${Number(st.actual_price).toFixed(2)}`
+    : st.skipped ? 'skipped'
+    : st.executed ? 'resting'
+    : st.last_block ? 'blocked'
+    : 'pending'
+  const tone = st =>
+    st.actual_stake > 0 ? 'var(--green)' : (st.skipped || st.last_block) ? 'var(--amber)' : 'var(--text-muted)'
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+      {stages.map(st => (
+        <span key={st.stage_no} title={st.skipped || st.last_block || st.mode} style={{ color: tone(st) }}>
+          S{st.stage_no} {money(st.planned_stake)} → {label(st)}
+        </span>
+      ))}
+      {pos.gross_back_stake > 0 && (
+        <span style={{ color: 'var(--text-primary)' }}>
+          Backed {money(pos.gross_back_stake)} @ {Number(pos.avg_back_odds).toFixed(2)} · worst {money(pos.max_open_loss)}
+        </span>
+      )}
+      {t.open_classification && (
+        <span className={`badge ${t.open_classification === 'GREEN' ? 'badge-green' : t.open_classification === 'AMBER' ? 'badge-amber' : 'badge-red'}`}>
+          {t.open_classification}
+        </span>
+      )}
+      {t.needs_review && <span style={{ color: 'var(--red)' }} title={t.needs_review}>⚠ needs review</span>}
+    </div>
+  )
+}
+
 const NotBuilt = ({ why, children }) => (
   <span className="not-built" title={`Not built yet — ${why}`}>{children}</span>
 )
@@ -235,10 +271,12 @@ function TradesTab() {
             <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Created</span><br /><span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{hhmmss(t.created_at)}</span></div>
           </div>
 
+          <StageStrip t={t} />
+
           <div style={{ display: 'flex', gap: 8 }}>
-            {t.control_mode !== 'AUTO' && <NotBuilt why="control modes are recorded, but nothing acts on them until the execution loop exists."><button className="btn btn-sm btn-green" disabled onClick={() => doControl(t.trade_id, 'AUTO')}>Auto</button></NotBuilt>}
-            {t.control_mode !== 'ASSISTED' && <NotBuilt why="control modes are recorded, but nothing acts on them until the execution loop exists."><button className="btn btn-sm" disabled onClick={() => doControl(t.trade_id, 'ASSISTED')}>Assisted</button></NotBuilt>}
-            {t.control_mode !== 'MANUAL_LOCK' && <NotBuilt why="control modes are recorded, but nothing acts on them until the execution loop exists."><button className="btn btn-sm btn-red" disabled onClick={() => doControl(t.trade_id, 'MANUAL_LOCK')}>Lock</button></NotBuilt>}
+            {t.control_mode !== 'AUTO' && <button className="btn btn-sm btn-green" title="Resume automated entries on this trade" onClick={() => doControl(t.trade_id, 'AUTO')}>Auto</button>}
+            {t.control_mode !== 'ASSISTED' && <NotBuilt why="assisted mode — the engine proposing and you approving — is not built. It currently behaves like Lock."><button className="btn btn-sm" disabled onClick={() => doControl(t.trade_id, 'ASSISTED')}>Assisted</button></NotBuilt>}
+            {t.control_mode !== 'MANUAL_LOCK' && <button className="btn btn-sm btn-red" title="Stop automated entries on this trade. Does not close the position." onClick={() => doControl(t.trade_id, 'MANUAL_LOCK')}>Lock</button>}
             <NotBuilt why="Flatten only relabels the trade. Close positions on Betfair directly."><button className="btn btn-sm btn-red" disabled onClick={() => doFlatten(t.trade_id)}>Flatten</button></NotBuilt>
           </div>
         </div>
@@ -559,7 +597,7 @@ function ControlsBar({ state, onReload }) {
       ) : (
         <button className="btn btn-green btn-sm" onClick={doStart}>Start</button>
       )}
-      <NotBuilt why="no orders are placed in either mode.">
+      <NotBuilt why="dry run places simulated orders. Live orders stay blocked by the LIVE_ORDERS_ENABLED interlock until it is changed in cloudbuild.yaml.">
         <button className={`btn btn-sm ${state?.dry_run ? '' : 'btn-red'}`} disabled onClick={doDryRun}>
           {state?.dry_run ? 'DRY RUN' : 'LIVE'}
         </button>

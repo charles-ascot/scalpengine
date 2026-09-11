@@ -34,7 +34,7 @@ from typing import Optional
 
 from betfair_client import BetfairClient
 from fsu_client import FSUClient
-from execution import BetfairVenue, OrderManager, SimulatedVenue, build_position
+from execution import BetfairVenue, OrderManager, SimulatedVenue, build_position, MIN_STAKE
 from candidate import (
     CandidateScore, QualificationConfig, qualify_candidate,
     compute_favourite_persistence, compute_first_lay_hit_prob,
@@ -42,7 +42,7 @@ from candidate import (
     compute_liquidity_score, compute_bookmaker_consensus,
 )
 from trade_planner import (
-    TradePlan, build_trade_plan, classify_open,
+    TradePlan, build_trade_plan, classify_open, InvalidationRules,
     qualifies_for_large_size,
 )
 from scenario_engine import (
@@ -68,6 +68,18 @@ BETFAIR_APP_KEY = os.environ.get("BETFAIR_APP_KEY", "")
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "15"))
 PROCESS_WINDOW_MINUTES = int(os.environ.get("PROCESS_WINDOW_MINUTES", "120"))
+
+# Staged entry timing (A.7). The spec times stages off a morning bookmaker
+# price and the exchange opening; FB7 is exchange-only and plans within the
+# process window, so stages are timed against the off instead:
+#   Stage 1 probe      — at planning, only if the confirmation window is still ahead
+#   Stage 2 confirm    — STAGE2 minutes before the off, re-underwritten against
+#                        the Stage 1 price (A.8): GREEN adds, AMBER adds half,
+#                        RED invalidates
+#   Stage 3 late add   — STAGE3 minutes before the off, only if still GREEN
+STAGE2_MINUTES_BEFORE_OFF = float(os.environ.get("STAGE2_MINUTES_BEFORE_OFF", "30"))
+STAGE3_MINUTES_BEFORE_OFF = float(os.environ.get("STAGE3_MINUTES_BEFORE_OFF", "10"))
+MAX_ENTRY_ATTEMPTS = 3   # rejected Stage 1 attempts before a trade is abandoned
 
 # GCS persistence
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "")
@@ -181,6 +193,7 @@ class ScalpEngine:
 
         # ── Monitoring ──
         self.monitoring: dict = {}   # market_id → [snapshots]
+        self._book_cache: Optional[dict] = None   # one market read per scan
 
         # ── Execution (B.14) ──
         # Venues read self.client at call time, so they follow logins and logouts.
@@ -459,6 +472,13 @@ class ScalpEngine:
         """
         now = datetime.now(timezone.utc)
         self.last_scan = now.isoformat()
+        self._book_cache = {}
+        try:
+            self._scan_body(now)
+        finally:
+            self._book_cache = None
+
+    def _scan_body(self, now: datetime):
         self._purge_stale_trades()
 
         session_ok = self.client.ensure_session()
@@ -627,19 +647,27 @@ class ScalpEngine:
             logger.debug(f"Scoring failed for {runner.runner_name}: {e}")
             return None
 
+    def _has_trade_for(self, market_id: str, selection_id: int) -> bool:
+        """One trade per runner per race, whatever became of it. Ignoring
+        cancelled trades would re-plan an abandoned entry every scan."""
+        return any(t.get("market_id") == market_id and t.get("selection_id") == selection_id
+                   for t in self.trades.values())
+
     def _handle_qualified_candidate(self, score, market, runner, minutes_to_off):
         """Handle a qualified candidate — build plan, check risk, create trade."""
         market_id = market["market_id"]
         trade_id = f"trd_{uuid.uuid4().hex[:12]}"
 
-        # Check if we already have a trade on this selection in this market
-        for tid, t in self.trades.items():
-            if (t.get("market_id") == market_id
-                    and t.get("selection_id") == runner.selection_id
-                    and t.get("state") not in ("SETTLED", "CANCELLED", "ERROR")):
-                return  # Already trading this runner
+        if self._has_trade_for(market_id, runner.selection_id):
+            return
 
-        entry_odds = runner.best_available_to_lay or 2.0
+        # Entry is the price we can back at now (best available to back). This
+        # used to read the lay side of the spread — one tick above the market —
+        # with an invented 2.0 when no price existed. No price, no trade.
+        entry_odds = runner.best_available_to_back
+        if not entry_odds:
+            logger.info(f"No back price for {runner.runner_name} — not planning")
+            return
 
         # Build trade plan
         plan = build_trade_plan(
@@ -726,15 +754,222 @@ class ScalpEngine:
             )
 
     def _manage_active_trades(self):
-        """Manage ladder placement, invalidation, stops for active trades."""
-        # Phase 1: log management cycles. Full ladder automation in Phase 2.
-        for trade_id, trade in list(self.trades.items()):
-            state = trade.get("state")
-            if state in ("SETTLED", "CANCELLED", "ERROR"):
-                continue
+        """Drive staged entry (A.7) and its re-underwriting (A.8).
 
-            # TODO Phase 2: Execute staged entry, place lay rungs,
-            # check invalidation, manage stops, flatten near off
+        Only AUTO trades are touched: MANUAL_LOCK and ASSISTED are never mutated
+        automatically (B.16). Exits — stop-out, pre-off flatten, cutting an
+        invalidated trade — are Stage 3 of the build and not handled here.
+        """
+        for trade_id, trade in list(self.trades.items()):
+            if trade.get("control_mode", ControlMode.AUTO.value) != ControlMode.AUTO.value:
+                continue
+            try:
+                self._manage_entry(trade_id, trade)
+            except Exception as e:
+                logger.error(f"Entry management failed for {trade_id}: {e}")
+                trade["needs_review"] = f"entry management error: {e}"
+        self._recompute_portfolio()
+
+    # ── staged entry helpers ──
+
+    def _advance(self, trade: dict, target: TradeState, reason: str) -> bool:
+        """Move a trade along the B.9.1 state machine, or refuse and flag."""
+        current = TradeState(trade["state"])
+        if not validate_trade_transition(current, target):
+            trade["needs_review"] = f"refused transition {current.value} -> {target.value}: {reason}"
+            logger.error(f"{trade['trade_id']}: {trade['needs_review']}")
+            return False
+        self.state_transitions.append(StateTransition(
+            entity_type="trade", entity_id=trade["trade_id"],
+            from_state=current.value, to_state=target.value, reason=reason,
+        ).to_dict())
+        trade["state"] = target.value
+        trade["state_changed_at"] = datetime.now(timezone.utc).isoformat()
+        logger.info(f"{trade['trade_id']} {current.value} -> {target.value}: {reason}")
+        return True
+
+    def _minutes_to_off(self, trade: dict) -> Optional[float]:
+        race_time = self._parse_dt(trade.get("race_time"))
+        if race_time is None:
+            return None
+        return (race_time - datetime.now(timezone.utc)).total_seconds() / 60
+
+    def _stage(self, trade_id: str, stage_no: int) -> Optional[dict]:
+        for st in (self.trade_plans.get(trade_id) or {}).get("entry_stages", []):
+            if st.get("stage_no") == stage_no:
+                return st
+        return None
+
+    def _stage_order(self, stage: Optional[dict]):
+        if not stage or not stage.get("order_id"):
+            return None
+        order = self.order_manager.orders.get(stage["order_id"])
+        if order is not None:
+            stage["actual_stake"] = order.matched_stake
+            stage["actual_price"] = order.avg_matched_price
+        return order
+
+    def _invalidation(self, trade_id: str) -> InvalidationRules:
+        raw = (self.trade_plans.get(trade_id) or {}).get("invalidation") or {}
+        known = InvalidationRules.__dataclass_fields__
+        return InvalidationRules(**{k: v for k, v in raw.items() if k in known})
+
+    def _in_flatten_window(self, trade_id: str, minutes_to_off: float) -> bool:
+        """Too close to the off to add exposure: inside the pre-off flatten window."""
+        stop = (self.trade_plans.get(trade_id) or {}).get("stop_rules") or {}
+        return minutes_to_off * 60 <= float(stop.get("flatten_before_off_secs", 60))
+
+    def _place_stage(self, trade: dict, stage: dict, stake_factor: float = 1.0) -> tuple:
+        """Place one entry stage as a BACK at the best available price.
+
+        Returns (order, outcome), outcome one of: placed, no_price, blocked,
+        too_small, rejected. Every stage passes the risk engine first — it is
+        authoritative over the strategy (B.13: block stage advance).
+        """
+        price = self._best_back(trade["market_id"], trade["selection_id"])
+        if price is None:
+            return None, "no_price"
+        stake = round(float(stage.get("planned_stake", 0.0)) * stake_factor, 2)
+
+        env = trade.get("scenario_envelope") or {}
+        risk = evaluate_risk(
+            market_id=trade["market_id"], sport="horse_racing",
+            planned_max_loss=stake,                    # a back can lose its stake
+            planned_liability=stake * (price - 1),     # same convention as planning
+            first_rung_only_pnl=(env.get("first_lay_only") or {}).get("min_pnl", 0.0),
+            portfolio=self.portfolio_state, config=self.risk_config,
+        )
+        if not risk.allowed:
+            stage["last_block"] = f"{risk.action}: {'; '.join(risk.reasons)}"
+            return None, "blocked"
+        if risk.action == "ALLOW_WITH_REDUCTION":
+            stake = round(stake * risk.reduction_factor, 2)
+        if stake < MIN_STAKE:
+            stage["skipped"] = f"stake £{stake:.2f} below minimum £{MIN_STAKE:.2f}"
+            return None, "too_small"
+
+        order, _ = self.submit_order(trade["trade_id"], "BACK", price, stake, source="AUTO")
+        stage["order_id"] = order.order_id
+        stage["submitted_price"], stage["submitted_stake"] = price, stake
+        if order.status == "REJECTED":
+            stage["last_block"] = f"rejected: {order.error_code}"
+            return order, "rejected"
+        stage["executed"] = True
+        self._recompute_portfolio()     # later stages this scan must see this exposure
+        return order, "placed"
+
+    def _manage_entry(self, trade_id: str, trade: dict):
+        state = trade.get("state")
+        mins = self._minutes_to_off(trade)
+        if mins is None:
+            return
+        s1, s2, s3 = self._stage(trade_id, 1), self._stage(trade_id, 2), self._stage(trade_id, 3)
+
+        # ── Stage 1: early probe ──
+        if state == TradeState.PLANNED.value:
+            # Staging needs the confirmation window still ahead; a trade planned
+            # inside it would collapse every stage into one scan.
+            if s1 is None or mins <= STAGE2_MINUTES_BEFORE_OFF:
+                return
+            order, outcome = self._place_stage(trade, s1)
+            if outcome == "placed":
+                self._advance(trade, TradeState.STAGE1_PENDING,
+                              f"stage 1 probe £{order.requested_stake} @ {order.price}")
+            elif outcome == "too_small":
+                self._advance(trade, TradeState.CANCELLED, s1["skipped"])
+            elif outcome == "rejected":
+                trade["entry_attempts"] = trade.get("entry_attempts", 0) + 1
+                if trade["entry_attempts"] >= MAX_ENTRY_ATTEMPTS:
+                    self._advance(trade, TradeState.CANCELLED,
+                                  f"stage 1 rejected {trade['entry_attempts']} times: {order.error_code}")
+            return          # no_price / blocked: try again next scan
+
+        if state == TradeState.STAGE1_PENDING.value:
+            o = self._stage_order(s1)
+            if o is None:
+                trade["needs_review"] = "stage 1 order missing"
+                return
+            if o.matched_stake > 0 and (o.status == "FILLED" or not o.is_open):
+                self._advance(trade, TradeState.STAGE1_ENTERED, f"probe matched £{o.matched_stake} @ {o.avg_matched_price}")
+                self._advance(trade, TradeState.AWAITING_CONFIRMATION, "waiting for confirmation window")
+            elif not o.is_open:
+                self._advance(trade, TradeState.CANCELLED, f"probe {o.status} with nothing matched")
+            elif mins <= STAGE2_MINUTES_BEFORE_OFF:
+                # Confirmation time reached with the probe still resting:
+                # stop chasing it and carry on with whatever matched.
+                self.order_manager.cancel(o.order_id, "confirmation window reached")
+                self._drain_order_events()
+                self._rebuild_position(trade_id)
+                if o.matched_stake > 0:
+                    self._advance(trade, TradeState.STAGE1_ENTERED, f"probe part-matched £{o.matched_stake}")
+                    self._advance(trade, TradeState.AWAITING_CONFIRMATION, "remainder cancelled")
+                else:
+                    self._advance(trade, TradeState.CANCELLED, "probe never matched")
+            return
+
+        # ── Stage 2: re-underwrite at the confirmation window (A.8) ──
+        if state == TradeState.AWAITING_CONFIRMATION.value:
+            if mins > STAGE2_MINUTES_BEFORE_OFF:
+                return
+            price = self._best_back(trade["market_id"], trade["selection_id"])
+            entry = (s1 or {}).get("actual_price") or 0.0
+            if price is None or entry <= 0 or self._in_flatten_window(trade_id, mins):
+                if mins <= STAGE3_MINUTES_BEFORE_OFF:
+                    self._advance(trade, TradeState.LIVE_EXPOSED, "no confirmation possible before the off")
+                return
+            verdict = classify_open(entry, price, self._invalidation(trade_id))
+            trade["open_classification"] = verdict
+            trade["open_check"] = {"entry": entry, "price": price,
+                                   "at": datetime.now(timezone.utc).isoformat()}
+            if verdict == "RED":
+                self._advance(trade, TradeState.INVALIDATED,
+                              f"re-underwrite RED: probe {entry}, market now {price} — no add")
+                return
+            if s2 is None:
+                self._advance(trade, TradeState.LIVE_EXPOSED, f"{verdict}: no stage 2 planned")
+                return
+            factor = 1.0 if verdict == "GREEN" else 0.5
+            order, outcome = self._place_stage(trade, s2, factor)
+            if outcome == "placed":
+                self._advance(trade, TradeState.STAGE2_PENDING,
+                              f"{verdict}: add £{order.requested_stake} @ {order.price}")
+            elif outcome != "no_price":
+                s2.setdefault("skipped", outcome)
+                self._advance(trade, TradeState.LIVE_EXPOSED, f"{verdict}: stage 2 not placed ({outcome})")
+            return
+
+        if state == TradeState.STAGE2_PENDING.value:
+            o = self._stage_order(s2)
+            if o is None or not o.is_open:
+                self._advance(trade, TradeState.LIVE_EXPOSED, "stage 2 complete")
+            elif mins <= STAGE3_MINUTES_BEFORE_OFF:
+                self.order_manager.cancel(o.order_id, "late-add window reached")
+                self._drain_order_events()
+                self._rebuild_position(trade_id)
+                self._advance(trade, TradeState.LIVE_EXPOSED, "stage 2 remainder cancelled")
+            return
+
+        # ── Stage 3: optional late add, strongest setups only (A.7) ──
+        if state == TradeState.LIVE_EXPOSED.value:
+            if s3 is None or s3.get("executed") or s3.get("skipped") or mins > STAGE3_MINUTES_BEFORE_OFF:
+                return
+            if trade.get("open_classification") != "GREEN":
+                s3["skipped"] = f"confirmation was {trade.get('open_classification')}, not GREEN"
+                return
+            if self._in_flatten_window(trade_id, mins):
+                s3["skipped"] = "inside the pre-off flatten window"
+                return
+            avg = (self.positions.get(trade_id) or {}).get("avg_back_odds") or 0.0
+            price = self._best_back(trade["market_id"], trade["selection_id"])
+            if price is None or avg <= 0:
+                return
+            if classify_open(avg, price, self._invalidation(trade_id)) != "GREEN":
+                s3["skipped"] = f"no longer GREEN: average {avg}, market {price}"
+                return
+            order, outcome = self._place_stage(trade, s3)
+            if outcome not in ("placed", "no_price"):
+                s3.setdefault("skipped", outcome)
+            return
 
     def _expire_alerts(self):
         """Remove expired bookmaker trigger alerts."""
@@ -1003,9 +1238,31 @@ class ScalpEngine:
     #  EXECUTION (B.14)
     # ──────────────────────────────────────────────
 
+    def _market_book(self, market_id: str) -> Optional[dict]:
+        """Raw listMarketBook for a market, read at most once per scan."""
+        if self._book_cache is not None and market_id in self._book_cache:
+            return self._book_cache[market_id]
+        book = self.client.get_market_book(market_id) if self.client else None
+        if self._book_cache is not None:
+            self._book_cache[market_id] = book
+        return book
+
     def _sim_market_book(self, market_id: str) -> Optional[dict]:
         """Real prices for the simulated venue. None if they cannot be read."""
-        return self.client.get_market_book(market_id) if self.client else None
+        return self._market_book(market_id)
+
+    def _best_back(self, market_id: str, selection_id: int) -> Optional[float]:
+        """Best price available to back, or None — including in-play or suspended."""
+        book = self._market_book(market_id)
+        if not book or book.get("status") != "OPEN" or book.get("inplay"):
+            return None
+        for r in book.get("runners", []):
+            if int(r.get("selectionId", -1)) == int(selection_id):
+                if r.get("status", "ACTIVE") != "ACTIVE":
+                    return None
+                atb = (r.get("ex") or {}).get("availableToBack") or []
+                return max(float(l["price"]) for l in atb) if atb else None
+        return None
 
     def _rebuild_position(self, trade_id: str):
         entry_source = (self.trade_plans.get(trade_id) or {}).get("entry_source", "EXCHANGE")

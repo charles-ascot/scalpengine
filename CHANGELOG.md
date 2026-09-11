@@ -9,6 +9,43 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — execution loop, Stage 2
+
+- **Staged entry (A.7), wired to the trade state machine (B.9.1).** The
+  engine now enters planned trades itself. Stage 1 probes at planning; at 30
+  minutes before the off the position is re-underwritten against the probe
+  price (A.8) — green adds the full Stage 2, amber adds half, red invalidates
+  and adds nothing; at 10 minutes an optional Stage 3 late add goes in only if
+  still green. The spec times stages off a morning bookmaker price and the
+  exchange opening; FB7 is exchange-only, so they are timed against the off,
+  and both windows are configurable.
+- Every stage passes the risk engine before it is placed (B.13: block stage
+  advance), and only `AUTO` trades are automated.
+- Trade cards show each stage's progress, the live position, the
+  re-underwriting verdict, and a warning when a trade needs review.
+
+### Changed
+
+- **Entries back at the best available back price.** `entry_odds` had been
+  read from the lay side of the spread — one tick above the market — so a
+  back placed there would have filled mainly when the horse drifted, just as
+  the favourite thesis weakened. Planning now uses the price that can
+  actually be backed.
+- **Lock and Auto re-enabled.** Now that automation exists, Lock genuinely
+  stops automated entries on a trade — the spec's "manual override locks the
+  trade out of automatic control". Assisted stays disabled: its approval flow
+  is not built.
+
+### Fixed
+
+- **An invented entry price.** With no lay price, `entry_odds` fell back to
+  `2.0`. Harmless while nothing placed orders; with Stage 2 it would have
+  staked on a made-up number. No price now means no trade.
+- **Abandoned trades would have been re-planned every scan.** The one-trade-
+  per-runner guard ignored cancelled trades, so an entry abandoned for any
+  reason would have been planned afresh 15 seconds later, indefinitely. The
+  guard now holds for the whole race.
+
 ### Added — operator key
 
 - **Operator API key** in Secret Manager (`scalpengine-ops-api-key`), mounted

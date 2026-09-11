@@ -29,6 +29,7 @@ suite "auth: REQUIRE_AUTH=true (hardened)"                      REQUIRE_AUTH=tru
 suite "persistence + portfolio"                                  "$PY" test_persistence.py
 suite "stale trade purge"                                        "$PY" test_purge.py
 suite "execution: orders, fills, simulation"                     "$PY" test_execution.py
+suite "staged entry and state machine"                           "$PY" test_staging.py
 
 [ "$fail" -eq 0 ] && echo "ALL SUITES PASSED" || echo "SUITE FAILURES"
 exit "$fail"

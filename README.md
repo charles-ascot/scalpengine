@@ -21,12 +21,13 @@ exists, any control that depends on it does nothing beyond changing a label.
 | Control | Claims to | Actually does |
 |---|---|---|
 | **Flatten** (Trades tab) | Close a position | Relabels the trade `STOPPING_OUT`. Cancels nothing, places nothing. |
-| **Dry run / Live** toggle | Switch to real money | Flips a flag nothing reads. No orders are placed in either mode. |
-| **Lock / Assisted** (Trades tab) | Take manual control | Changes the control-mode label. No execution code reads it. |
+| **Dry run / Live** toggle | Switch to real money | Dry run places simulated orders. Live orders are refused by the `LIVE_ORDERS_ENABLED` interlock, so the toggle stays disabled until that changes. |
+| **Lock** (Trades tab) | Take manual control | Works — stops automated entries on that trade. Does not close the position. |
+| **Assisted** (Trades tab) | Engine proposes, you approve | Not built. Behaves like Lock. |
 | **Confirm** (Triggers tab) | Register a bookmaker bet and start its lay ladder | Records the confirmation. Creates no trade. |
-| **Kill switch** | Block new trades | Works — blocks new trade *plans*. Cannot cancel orders; none exist. |
+| **Kill switch** | Block new trades | Works — blocks new trade plans and every entry stage. Does not close open positions. |
 | **Start / Stop** | Run the scan loop | Works. Orders are only reconciled while it runs. |
-| **Risk limits, point value, ladder profile** | Size trades | Work, at planning time only. |
+| **Risk limits, point value, ladder profile** | Size trades | Work — at planning and before every entry stage. |
 | **Countries, process window** | Scope scanning | Work. |
 
 The four cosmetic controls are disabled in the dashboard, drawn with a dashed
@@ -105,6 +106,8 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 | `DRY_RUN` | `true` | Intended to gate real orders. **Currently gates nothing** — see [Control status](#control-status). **Overridden by persisted state — see [Configuration precedence](#configuration-precedence).** |
 | `POLL_INTERVAL` | `15` | Seconds between scan cycles. |
 | `PROCESS_WINDOW_MINUTES` | `120` | How far ahead of the off to consider races. |
+| `STAGE2_MINUTES_BEFORE_OFF` | `30` | When the Stage 2 confirmation add is re-underwritten. |
+| `STAGE3_MINUTES_BEFORE_OFF` | `10` | When the optional Stage 3 late add is considered. |
 | `LIVE_ORDERS_ENABLED` | `false` | Real-money interlock. While `false` the Betfair venue refuses every order, whatever the dashboard's dry-run flag says. Locked in `cloudbuild.yaml`. |
 | `REQUIRE_AUTH` | `false` | `true` closes the API to unauthenticated callers. See [Authentication](#authentication). |
 
@@ -116,9 +119,9 @@ locally. The backend's CORS allow-list already includes `localhost:5173`.
 
 ## Execution
 
-Stage 1 of the execution loop (see the CHI-SPC-002 build order): the engine can
-place, track and reconcile orders, and knows what matched. Nothing places
-orders automatically yet — that is Stage 2.
+Stages 1 and 2 of the execution loop (see the CHI-SPC-002 build order): the
+engine places, tracks and reconciles orders, and enters trades in stages.
+Nothing exits a position yet — that is Stage 3.
 
 - **Two venues, one interface.** In dry run, orders go to a simulated venue;
   otherwise to Betfair. Both report order state in Betfair's own
@@ -138,6 +141,24 @@ orders automatically yet — that is Stage 2.
   `customerOrderRef` / `customerStrategyRef`). If a placement times out, the
   order is neither assumed placed nor assumed failed: it is looked up by
   reference, and rejected only after three polls fail to find it.
+
+### Staged entry
+
+Only `AUTO` trades are automated. Every stage backs at the best available price
+and passes the risk engine first; the kill switch and risk limits can block any
+stage.
+
+| Stage | When | What |
+|---|---|---|
+| 1 — probe | At planning, if more than 30 min remain | Back the Stage 1 stake (20–35% of intended size) |
+| 2 — confirm | 30 min before the off | Re-underwrite against the probe price (A.8): **green** adds the full stage, **amber** adds half, **red** marks the trade invalidated and adds nothing |
+| 3 — late add | 10 min before the off | Only if still green, and never inside the pre-off flatten window |
+
+The spec times these stages off a morning bookmaker price and the exchange
+opening. FB7 is exchange-only and plans within two hours of the off, so they
+are timed against the off instead. A probe that never matches is cancelled at
+the confirmation window; one that part-matches carries on with what matched.
+Each runner gets one trade per race, whatever became of it.
 
 ### How the dry run simulates
 
@@ -323,9 +344,12 @@ No secret belongs in this repository. `.env` is gitignored.
 
 ## Known limitations
 
-- **No automated execution yet.** Orders can be placed and reconciled (Stage 1),
-  but nothing places them automatically, and nothing exits a position.
-  See [Control status](#control-status).
+- **No exits yet.** Staged entries open positions, but nothing closes them:
+  no stop-out, no pre-off flatten, and invalidated trades are not cut. In dry
+  run, positions ride to the off. That is Stage 3.
+- **Simulated positions do not settle.** Exposure stays on the book until
+  Stage 5 records settlements, so a long dry run will eventually hit the
+  Level 4 caps.
 - **Reconciliation only runs while the engine runs.** A stopped engine does not
   track orders.
 - **`PositionSnapshot.unrealized_pnl` is a midpoint proxy** — the average of
